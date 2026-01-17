@@ -346,6 +346,14 @@ def rep_add(chat_id: int, user_id: int, delta: int):
     ON CONFLICT(chat_id, user_id) DO UPDATE SET score = score + ?
     """, (chat_id, user_id, delta, delta))
 
+def rep_all(chat_id: int):
+    return db_all("""
+        SELECT user_id, score
+        FROM rep
+        WHERE chat_id=?
+        ORDER BY score DESC, user_id ASC
+    """, (chat_id,))
+
 def rep_can_vote(chat_id: int, from_id: int, to_id: int, now: datetime, cooldown_min: int = REP_COOLDOWN_MIN) -> bool:
     row = db_one("""
     SELECT ts FROM rep_votes WHERE chat_id=? AND from_user_id=? AND to_user_id=?
@@ -756,6 +764,56 @@ async def main():
             "Сообщения по юзерам (24ч):\n" + fmt_users(users24) + "\n\n"
             "Сообщения по юзерам (7д):\n" + fmt_users(users7)
         )
+    @dp.message(Command("rep"))
+    async def cmd_rep(message: Message):
+        chat_id = message.chat.id
+
+        # 1) /rep reply -> один
+        if message.reply_to_message and message.reply_to_message.from_user:
+            uid = message.reply_to_message.from_user.id
+            name = get_user_display(chat_id, uid)
+            score = rep_get(chat_id, uid)
+            await message.answer(f"Репутация {name}: {score}")
+            return
+
+        parts = (message.text or "").split()
+
+        # 2) /rep @username -> один
+        if len(parts) >= 2 and parts[1].startswith("@"):
+            uname = parts[1][1:]
+            uid = find_user_id_by_username(chat_id, uname)
+            if not uid:
+                await message.answer("Не знаю этого @username (пусть он хоть раз напишет в чат после запуска бота).")
+                return
+            name = get_user_display(chat_id, uid)
+            score = rep_get(chat_id, uid)
+            await message.answer(f"Репутация {name}: {score}")
+            return
+
+        # 3) /rep -> все
+        rows = rep_all(chat_id)
+        if not rows:
+            await message.answer("Репутации пока нет.")
+            return
+
+        lines = ["Репутация в чате:"]
+        for i, (uid, score) in enumerate(rows, start=1):
+            name = get_user_display(chat_id, int(uid))
+            lines.append(f"{i}. {name} — {score}")
+
+        # Telegram лимит на длину сообщения, режем пачками
+        chunk = []
+        size = 0
+        for line in lines:
+            if size + len(line) + 1 > 3500:
+                await message.answer("\n".join(chunk))
+                chunk = []
+                size = 0
+            chunk.append(line)
+            size += len(line) + 1
+
+        if chunk:
+            await message.answer("\n".join(chunk))
 
     # -------- Main message handler --------
     @dp.message(F.text)
