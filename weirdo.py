@@ -158,6 +158,10 @@ def db_all(sql, params=()):
 
 def init_db():
     con = sqlite3.connect(DB_PATH)
+    con.execute("PRAGMA journal_mode=WAL;")
+    con.execute("PRAGMA synchronous=NORMAL;")
+    con.execute("PRAGMA busy_timeout=5000;")
+
     cur = con.cursor()
 
     cur.execute("""
@@ -302,10 +306,21 @@ def add_msg_log(chat_id: int, ts: datetime, user_id: int):
     db_exec("INSERT INTO msg_log(chat_id, ts, user_id) VALUES(?, ?, ?)", (chat_id, ts.isoformat(), user_id))
 
 def add_words(chat_id: int, ts: datetime, words):
+    rows = []
     for w in words:
+        w = w.lower()
         if len(w) < 3:
             continue
-        db_exec("INSERT INTO word_log(chat_id, ts, word) VALUES(?, ?, ?)", (chat_id, ts.isoformat(), w))
+        rows.append((chat_id, ts.isoformat(), w))
+    if not rows:
+        return
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.executemany("INSERT INTO word_log(chat_id, ts, word) VALUES(?, ?, ?)", rows)
+    con.commit()
+    con.close()
+
 
 def add_phrase(chat_id: int, ts: datetime, phrase: str):
     if not phrase or len(phrase) > 300:
@@ -314,9 +329,13 @@ def add_phrase(chat_id: int, ts: datetime, phrase: str):
 
 def prune_logs(chat_id: int, cutoff: datetime):
     cutoff_s = cutoff.isoformat()
-    db_exec("DELETE FROM msg_log WHERE chat_id=? AND ts < ?", (chat_id, cutoff_s))
-    db_exec("DELETE FROM word_log WHERE chat_id=? AND ts < ?", (chat_id, cutoff_s))
-    db_exec("DELETE FROM phrase_log WHERE chat_id=? AND ts < ?", (chat_id, cutoff_s))
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("DELETE FROM msg_log WHERE chat_id=? AND ts < ?", (chat_id, cutoff_s))
+    cur.execute("DELETE FROM word_log WHERE chat_id=? AND ts < ?", (chat_id, cutoff_s))
+    cur.execute("DELETE FROM phrase_log WHERE chat_id=? AND ts < ?", (chat_id, cutoff_s))
+    con.commit()
+    con.close()
 
 def get_top_phrase(chat_id: int, since: datetime):
     rows = db_all("""
@@ -860,7 +879,7 @@ async def background_silence_watcher(bot: Bot):
         except Exception:
             pass
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(60)
 
 # =======================
 # MAIN
@@ -1198,7 +1217,18 @@ async def main():
         # =======================
         # 3) DUEL: accept/decline
         # =======================
-        if tlow in ("принял", "принято", "го", "ок", "да"):
+        if tlow in (
+                "принял", "принято", "принять", "принимаю",
+                "погнали", "погнали!", "го", "го!", "поехали",
+                "ладно", "ок", "окей", "оке", "да",
+                "согласен", "согласна",
+                "давай", "давай!", 
+                "врываемся",
+                "готов", "готово",
+                "я в деле",
+                "приступаем",
+            ):
+
             pend = duel_get_pending_for_b(chat_id, u.id)
             if pend:
                 duel_id, a_id, b_id, accept_deadline = pend
