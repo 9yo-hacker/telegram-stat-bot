@@ -60,6 +60,49 @@ DUEL_ROUND_SECONDS_START = 30
 DUEL_ROUND_SECONDS_MIN = 10
 DUEL_ROUND_SECONDS_DEC = 3
 
+DUEL_EPIC_PROB = 0.45
+DUEL_NEAR_MISS_EPS = 0.07
+
+DUEL_CRIT_BASE = 0.10        # базовый шанс крита при выстреле
+DUEL_CRIT_AFTER_AIM = 0.22   # шанс крита если прошлым действием был aim
+DUEL_CRIT_DMG = 2            # урон крита 
+DUEL_FUMBLE_PROB = 0.04      # осечка даже при патронах 
+
+EPIC_ONE_HP = [
+    "☠️ {name} едва держится. Следующий выстрел решит всё.",
+    "🩸 {name} на последнем дыхании.",
+    "⚠️ У {name} осталась одна ошибка до конца.",
+    "🕯️ {name} балансирует между жизнью и поражением.",
+    "🎯 Один точный выстрел — и {name} падёт.",
+]
+
+EPIC_BOTH_ONE_HP = [
+    "⚡ Оба на 1❤. Тишина перед развязкой.",
+    "🔥 Дуэль дошла до предела: у обоих по 1❤.",
+    "🕰️ Следующий выстрел войдёт в историю.",
+    "⚔️ Два бойца. Два дыхания. Один финал.",
+]
+
+EPIC_NEAR_MISS = [
+    "🫣 Пуля прошла в миллиметре.",
+    "💨 Настолько близко, что воздух дрогнул.",
+    "😬 Это должно было попасть.",
+]
+
+EPIC_DOUBLE_MISS = [
+    "🥶 Нервы не выдержали. Оба промахнулись.",
+    "😶 Слишком много напряжения — ни одного попадания.",
+    "🤐 Молчание. Оба выстрела впустую.",
+]
+
+EPIC_CRIT = [
+    "💥 КРИТ! Это было слишком точно.",
+    "⚡ Критический выстрел — больно.",
+    "🔥 В яблочко. Критическое попадание!",
+]
+
+def epic_fmt(t: str, **kw) -> str:
+    return t.format(**kw)
 
 # =======================
 # TIME
@@ -421,14 +464,16 @@ def duel_new_data(a_id: int, b_id: int) -> dict:
                 "ammo": DUEL_AMMO_MAX,
                 "acc": DUEL_BASE_ACC,
                 "heal_used": False,
-                "last_action": None
+                "last_action": None,
+                "aimed": False
             },
             str(b_id): {
                 "hp": DUEL_HP,
                 "ammo": DUEL_AMMO_MAX,
                 "acc": DUEL_BASE_ACC,
                 "heal_used": False,
-                "last_action": None
+                "last_action": None,
+                "aimed": False
             }
         },
         "moves": {str(a_id): None, str(b_id): None},
@@ -522,6 +567,18 @@ def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
     a_name = get_user_display(chat_id, a_id)
     b_name = get_user_display(chat_id, b_id)
 
+    def chosen(uid: int) -> str:
+        a = data["moves"].get(str(uid))
+        if not a:
+            return "—"
+        return {
+            "shoot": "🔫 выстрел",
+            "aim": "🎯 прицел",
+            "dodge": "🕺 уклон",
+            "reload": "🔄 перезарядка",
+            "heal": "🩹 перевязка",
+        }.get(a, a)
+
     def moved(uid: int) -> str:
         return "✅ походил" if data["moves"].get(str(uid)) else "⏳ ждёт"
 
@@ -535,7 +592,8 @@ def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
 
     def p_line(name, p, uid):
         acc = int(p["acc"] * 100)
-        return f"{name}: ❤{p['hp']} | 🔫{p['ammo']} | 🎯{acc}% | 🩹{'да' if p['heal_used'] else 'нет'} | {moved(uid)}"
+        return f"{name}: ❤{p['hp']} | 🔫{p['ammo']} | 🎯{acc}% | 🩹{'да' if p['heal_used'] else 'нет'} | {moved(uid)} | выбор: {chosen(uid)}"
+
 
     return (
         f"Раунд {data['round']}\n"
@@ -552,9 +610,6 @@ def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
 
 def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: dict) -> tuple[str, bool]:
-    """
-    Возвращает (result_text, finished)
-    """
     pA = data["players"][str(a_id)]
     pB = data["players"][str(b_id)]
     mA = data["moves"][str(a_id)]
@@ -563,67 +618,119 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
     a_name = get_user_display(chat_id, a_id)
     b_name = get_user_display(chat_id, b_id)
 
-    # Нормализация "не выбрал" — считаем как уклон (чтобы игра не стопорилась)
+    # если не выбрал — уклон (не стопорим бой)
     if mA is None:
         mA = "dodge"
     if mB is None:
         mB = "dodge"
 
-    # Применяем небоевые действия сначала
     log = []
 
-    def apply_action(pid, action, me, opp_name):
+    def apply_action(action: str, me: dict, actor_name: str):
         nonlocal log
         if action == "aim":
             me["acc"] = clamp(me["acc"] + DUEL_AIM_BONUS, DUEL_BASE_ACC, DUEL_MAX_ACC)
-            log.append(f"{opp_name}: прицеливается.")
+            me["aimed"] = True
+            log.append(f"{actor_name}: 🎯 прицел (+точность).")
         elif action == "reload":
             me["ammo"] = DUEL_AMMO_MAX
-            log.append(f"{opp_name}: перезаряжается.")
+            log.append(f"{actor_name}: 🔄 перезарядка (патроны = {DUEL_AMMO_MAX}).")
         elif action == "heal":
             if me["heal_used"]:
-                log.append(f"{opp_name}: пытался перевязаться, но уже использовал.")
+                log.append(f"{actor_name}: 🩹 перевязка не удалась (уже использовал).")
             else:
                 me["heal_used"] = True
+                before = me["hp"]
                 me["hp"] = clamp(me["hp"] + DUEL_HEAL_AMOUNT, 0, DUEL_HP)
-                log.append(f"{opp_name}: перевязка (+{DUEL_HEAL_AMOUNT}❤).")
+                log.append(f"{actor_name}: 🩹 перевязка ({before}→{me['hp']}❤).")
         elif action == "dodge":
-            log.append(f"{opp_name}: уходит в уклон.")
-        elif action == "shoot":
-            # стрельбу отдельно
-            pass
+            log.append(f"{actor_name}: 🕺 уклон.")
+        # shoot здесь НЕ логируем — отдельно ниже
 
-    # Сначала применяем всем aim/reload/heal/dodge (shoot позже)
-    apply_action(a_id, mA, pA, a_name)
-    apply_action(b_id, mB, pB, b_name)
-
-    # Затем стрельба
     def shoot(shooter_name, shooter, target_name, target, target_action):
         nonlocal log
+
+        # осечка 
+        if DUEL_FUMBLE_PROB > 0 and random.random() < DUEL_FUMBLE_PROB:
+            log.append(f"{shooter_name}: 🔫 осечка! Щёлк…")
+            shooter["aimed"] = False
+            return {"shot": True, "hit": False, "crit": False, "chance": None, "roll": None, "target": target_name}
+
         if shooter["ammo"] <= 0:
-            log.append(f"{shooter_name}: щёлк — патроны кончились.")
-            return False
+            log.append(f"{shooter_name}: 🔫 щёлк — патроны кончились.")
+            shooter["aimed"] = False
+            return {"shot": False, "hit": False, "crit": False, "chance": None, "roll": None, "target": target_name}
+
         shooter["ammo"] -= 1
 
         chance = shooter["acc"]
         if target_action == "dodge":
             chance = clamp(chance - DUEL_DODGE_PENALTY, 0.05, 0.95)
 
-        hit = random.random() < chance
+        roll = random.random()
+        hit = roll < chance
+
+        crit = False
         if hit:
-            target["hp"] = max(0, target["hp"] - 1)
-            log.append(f"{shooter_name}: попал по {target_name}. (-1❤)")
+            crit_chance = DUEL_CRIT_AFTER_AIM if shooter.get("aimed") else DUEL_CRIT_BASE
+            crit = random.random() < crit_chance
+
+            dmg = DUEL_CRIT_DMG if crit else 1
+            target["hp"] = max(0, target["hp"] - dmg)
+
+            if crit:
+                log.append(f"{shooter_name}: 💥 КРИТ по {target_name}! (-{dmg}❤)")
+            else:
+                log.append(f"{shooter_name}: 🔫 попал по {target_name}. (-1❤)")
         else:
-            log.append(f"{shooter_name}: промахнулся.")
-        return hit
+            miss_lines = ["💨 МИМО!", "🫥 промах.", "🧱 пуля ушла в стену.", "🌪️ мимо цели."]
+            log.append(f"{shooter_name}: 🔫 {random.choice(miss_lines)}")
 
-    # Оба могут стрелять в одном раунде
+        shooter["aimed"] = False
+        return {"shot": True, "hit": hit, "crit": crit, "chance": chance, "roll": roll, "target": target_name}
+
+    # 1) небоевые действия
+    if mA != "shoot":
+        apply_action(mA, pA, a_name)
+    if mB != "shoot":
+        apply_action(mB, pB, b_name)
+
+    # 2) стрельба
+    sA = None
+    sB = None
     if mA == "shoot":
-        shoot(a_name, pA, b_name, pB, mB)
+        sA = shoot(a_name, pA, b_name, pB, mB)
     if mB == "shoot":
-        shoot(b_name, pB, a_name, pA, mA)
+        sB = shoot(b_name, pB, a_name, pA, mA)
 
-    # Проверка победы
+    # 3) эпик-строка (одна за раунд)
+    epic = None
+    if pA["hp"] == 1 and pB["hp"] == 1:
+        epic = "⚡ Оба на последнем дыхании."
+    elif pA["hp"] == 1:
+        epic = f"🩸 {a_name} едва держится."
+    elif pB["hp"] == 1:
+        epic = f"🩸 {b_name} едва держится."
+    else:
+        def near_miss(s):
+            return (
+                s and s.get("shot")
+                and not s.get("hit")
+                and s.get("chance") is not None
+                and s.get("roll") is not None
+                and abs(s["roll"] - s["chance"]) <= DUEL_NEAR_MISS_EPS
+            )
+
+        if near_miss(sA) or near_miss(sB):
+            epic = "😬 Пуля прошла в миллиметре."
+        elif sA and sB and sA.get("shot") and sB.get("shot") and (not sA.get("hit")) and (not sB.get("hit")):
+            epic = "🥶 Оба промахнулись."
+
+    # эпик иногда, не всегда
+    if epic and random.random() < DUEL_EPIC_PROB:
+        log.append(epic)
+
+    # 4) победа / следующий раунд
     finished = False
     result = ""
 
@@ -641,21 +748,17 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
         score = rep_get(chat_id, a_id)
         result = f"Победа {a_name}. +{DUEL_REP_REWARD} репутации (итого {score})."
     else:
-        # следующий раунд
         data["round"] += 1
         data["moves"][str(a_id)] = None
         data["moves"][str(b_id)] = None
 
-    # Собираем текст
     body = "\n".join(log) if log else "Тишина."
     if finished:
-        text = f"{body}\n\n{result}"
-        return text, True
+        return f"{body}\n\n{result}", True
 
-    # промежуточный статус
     status = duel_status_text(chat_id, a_id, b_id, data)
-    text = f"{body}\n\n{status}"
-    return text, False
+    return f"{body}\n\n{status}", False
+
 
 # =======================
 # SILENCE WATCHER
