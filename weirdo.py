@@ -597,69 +597,61 @@ def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
     a_name = get_user_display(chat_id, a_id)
     b_name = get_user_display(chat_id, b_id)
 
-    def chosen(uid: int) -> str:
-        a = data["moves"].get(str(uid))
-        if not a:
-            return "—"
+    # --- helpers ---
+    def act_name(action: str | None) -> str:
         return {
-            "shoot": "🔫 выстрел",
             "aim": "🎯 прицел",
-            "dodge": "🕺 уклон",
             "reload": "🔄 перезарядка",
             "heal": "🩹 перевязка",
-        }.get(a, a)
+            "dodge": "🕺 уклон",
+            "shoot": "🔫 выстрел",
+            None: "—",
+        }.get(action, str(action))
 
-    def moved(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
-        a = data["players"][str(a_id)]
-        b = data["players"][str(b_id)]
-        a_name = get_user_display(chat_id, a_id)
-        b_name = get_user_display(chat_id, b_id)
+    def moved(uid: int) -> str:
+        return "✅ походил" if data["moves"].get(str(uid)) is not None else "⏳ ждёт"
 
-        def move_badge(uid: int) -> str:
-            act = data["moves"].get(str(uid))
-            if act:
-                return f"✅ {act_name(act)}"
-            return "⏳ ждёт"
+    def chosen(uid: int) -> str:
+        return act_name(data["moves"].get(str(uid)))
 
-        def p_line(name, p, uid):
-            acc = int(p["acc"] * 100)
-            return f"{name}: ❤{p['hp']} | 🔫{p['ammo']} | 🎯{acc}% | 🩹{'да' if p['heal_used'] else 'нет'} | {move_badge(uid)}"
-
-        last = data.get("last_round_log", "").strip()
-        last_block = f"Прошлый раунд:\n{last}\n\n" if last else ""
-
+    def p_line(name: str, p: dict, uid: int) -> str:
+        acc = int(p["acc"] * 100)
         return (
-            f"{last_block}"
-            f"Раунд {data['round']}\n"
-            f"Время на ход: {data.get('round_seconds', DUEL_ROUND_SECONDS_START)}s\n\n"
-            f"{p_line(a_name, a, a_id)}\n"
-            f"{p_line(b_name, b, b_id)}\n\n"
-            "Жми кнопки ниже 👇"
+            f"{name}\n"
+            f"❤ {p['hp']}   🔫 {p['ammo']}   🎯 {acc}%   🩹 {'да' if p['heal_used'] else 'нет'}\n"
+            f"{moved(uid)} • выбор: {chosen(uid)}"
         )
 
-    deadline_str = ""
+    # --- таймер ---
+    timer = ""
     if data.get("deadline"):
         try:
             dl = datetime.fromisoformat(data["deadline"])
-            deadline_str = dl.strftime("%H:%M:%S")
+            timer = f"⏱️ до {dl.strftime('%H:%M:%S')}"
         except Exception:
-            deadline_str = str(data["deadline"])
+            pass
 
-    def p_line(name, p, uid):
-        acc = int(p["acc"] * 100)
-        return f"{name}: ❤{p['hp']} | 🔫{p['ammo']} | 🎯{acc}% | 🩹{'да' if p['heal_used'] else 'нет'} | {moved(uid)} | выбор: {chosen(uid)}"
+    # --- прошлый раунд ---
+    last_block = ""
+    last = (data.get("last_round_log") or "").strip()
+    if last:
+        lines = last.splitlines()
+        short = "\n".join(lines[:3])
+        if len(lines) > 3:
+            short += "\n…"
+        last_block = f"🕯️ **Прошлый раунд**\n{short}\n\n"
 
-
-    return (
-        f"Раунд {data['round']}\n"
-        f"Время на ход: {data.get('round_seconds', DUEL_ROUND_SECONDS_START)}s"
-        + (f" (до {deadline_str})" if deadline_str else "")
-        + "\n\n"
-        f"{p_line(a_name, a, a_id)}\n"
+    # --- сборка ---
+    text = (
+        f"{last_block}"
+        f"⚔️ **ДУЭЛЬ** — Раунд {data['round']}\n"
+        f"{timer}\n\n"
+        f"{p_line(a_name, a, a_id)}\n\n"
         f"{p_line(b_name, b, b_id)}\n\n"
-        "Жми кнопки ниже 👇"
+        f"⬇️ Жми действие кнопками ниже"
     )
 
+    return text
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
