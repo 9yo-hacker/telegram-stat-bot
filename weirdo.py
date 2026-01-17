@@ -464,6 +464,14 @@ def duel_get_active_by_arena(chat_id: int, arena_msg_id: int):
     """, (chat_id, arena_msg_id))
     return row
 
+def duel_get_done_by_arena(chat_id: int, arena_msg_id: int):
+    row = db_one("""
+    SELECT duel_id, a_id, b_id, data
+    FROM duels
+    WHERE chat_id=? AND arena_msg_id=? AND state='done'
+    """, (chat_id, arena_msg_id))
+    return row
+
 def duel_update_data(chat_id: int, duel_id: str, data: dict):
     db_exec("UPDATE duels SET data=? WHERE chat_id=? AND duel_id=?", (json.dumps(data, ensure_ascii=False), chat_id, duel_id))
 
@@ -888,6 +896,36 @@ async def main():
                     duel_set_state(chat_id, duel_id, "cancel")
                     await message.answer("Дуэль истекла по времени.")
                     return
+                
+                # --- surrender ---
+                if tlow in ("сдаться", "покинуть"):
+                    # кто победил
+                    winner_id = b_id if u.id == a_id else a_id
+                    loser_id = u.id
+
+                    # дать репу победителю
+                    rep_add(chat_id, winner_id, DUEL_REP_REWARD)
+
+                    winner_name = get_user_display(chat_id, winner_id)
+                    loser_name = get_user_display(chat_id, loser_id)
+                    score = rep_get(chat_id, winner_id)
+
+                    # финальное сообщение дуэли (новое)
+                    final_msg = await bot.send_message(
+                        chat_id,
+                        f"ДУЭЛЬ\n\n{loser_name} сдался. Победа {winner_name}.\n"
+                        f"+{DUEL_REP_REWARD} репутации (итого {score}).",
+                        parse_mode="HTML"
+                    )
+
+                    # добавить в список сообщений дуэли
+                    data["bot_msgs"].append(final_msg.message_id)
+                    duel_update_data(chat_id, duel_id, data)
+
+                    # обновить arena на финал и завершить
+                    duel_set_arena(chat_id, duel_id, final_msg.message_id)
+                    duel_set_state(chat_id, duel_id, "done")
+                    return
 
                 action = parse_action(text)
                 if not action:
@@ -986,6 +1024,33 @@ async def main():
                     phrase, c = top
                     await bot.send_message(chat_id, f"ХАЙП (2 дня):\n«{phrase}»\nПовторов: {c}")
                     set_field(chat_id, "last_autohype_at", now)
+        # --- prepare arena: delete intermediate bot messages ---
+        if message.reply_to_message and tlow == "подготовить арену":
+            done = duel_get_done_by_arena(chat_id, message.reply_to_message.message_id)
+            if not done:
+                return
+
+            duel_id, a_id, b_id, data_json = done
+            data = json.loads(data_json) if data_json else {}
+            ids = data.get("bot_msgs", [])
+
+            # если нечего чистить
+            if len(ids) <= 2:
+                await message.answer("Тут и так чисто.")
+                return
+
+            # удаляем все кроме первого и последнего
+            to_delete = ids[1:-1]
+            deleted = 0
+            for mid in to_delete:
+                try:
+                    await bot.delete_message(chat_id, mid)
+                    deleted += 1
+                except Exception:
+                    pass
+
+            await message.answer(f"Подготовлено. Удалено сообщений: {deleted}")
+            return
 
     asyncio.create_task(background_silence_watcher(bot))
     await dp.start_polling(bot)
