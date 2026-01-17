@@ -3,20 +3,23 @@ import os
 import re
 import random
 import sqlite3
+import json
+import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, ReactionTypeEmoji
 from aiogram.filters import Command
-from aiogram.types import ReactionTypeEmoji
 
-# TOKEN = os.getenv("aboba")                  # --- PLACE TOKEN HERE (cmd) ---
+# =======================
+# CONFIG
+# =======================
+TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 DEFAULT_TZ = os.getenv("BOT_TZ", "Europe/Moscow")
 
-# Триггеры по словоформам (без библиотек морфологии, но ловит нормально)
-
+# Триггеры 💩 (словоформы)
 RE_TRIGGER = re.compile(
     r"(?<!\w)(пар(а|ы|е|у|ой|ам|ами|ах)?|долг(и|а|у|ом|ов|ам|ами|ах)?)(?!\w)",
     re.IGNORECASE | re.UNICODE,
@@ -24,36 +27,85 @@ RE_TRIGGER = re.compile(
 
 RE_WORD = re.compile(r"[A-Za-zА-Яа-яЁё0-9]+", re.UNICODE)
 
-# Шансы и лимиты
-POOP_AFTER_DAILY_LIMIT_PROB = 0.25  # после 5 сообщений в сутки
+# Вероятности
+EASTER_PROB = 0.005
+ECHO_PROB = 0.005
+AUTO_HYPE_PROB = 0.005
+
+# Ограничения
 DAILY_TRIGGER_LIMIT = 5
-
-EASTER_PROB = 0.05
-ECHO_PROB = 0.001
-AUTO_HYPE_PROB = 0.02
-
-# Кулдауны, чтобы не спамило даже при везении вероятности
+POOP_AFTER_DAILY_LIMIT_PROB = 0.25
 MIN_EASTER_EVERY_MIN = 20
 MIN_AUTOHYPE_EVERY_HOURS = 6
 
+# Репутация
+REP_COOLDOWN_MIN = 10
+ALLOW_NEGATIVE_REP = True
+
+# Дуэли
+DUEL_ACCEPT_MIN = 2
+DUEL_MOVE_MIN = 2 # сколько минут на ход после старта/после раунда
+DUEL_HP = 4
+DUEL_AMMO_MAX = 3
+DUEL_BASE_ACC = 0.35
+DUEL_AIM_BONUS = 0.2 # за действие "прицел"
+DUEL_DODGE_PENALTY = 0.3 # за действие "уклон" (уменьшает шанс попадания по уклоняющемуся)
+DUEL_MAX_ACC = 0.85
+DUEL_HEAL_AMOUNT = 1
+DUEL_REP_REWARD = 3
+
+# =======================
+# TIME
+# =======================
 def now_tz(tz: str) -> datetime:
     return datetime.now(ZoneInfo(tz))
 
 def date_key(dt: datetime) -> str:
     return dt.date().isoformat()
 
-def tokenize(text: str):
-    return [w.lower() for w in RE_WORD.findall(text)]
+def in_window(dt: datetime, start_h: int, end_h: int) -> bool:
+    return start_h <= dt.hour < end_h
 
-def has_trigger(text: str) -> bool:
-    return bool(RE_TRIGGER.search(text or ""))
+# =======================
+# TEXT
+# =======================
+def tokenize(text: str):
+    return [w.lower() for w in RE_WORD.findall(text or "")]
 
 def normalize_phrase(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"\s+", " ", t)
     return t
 
-# ---------- DB helpers ----------
+def has_trigger(text: str) -> bool:
+    return bool(RE_TRIGGER.search(text or ""))
+
+# =======================
+# DB HELPERS
+# =======================
+def db_exec(sql, params=()):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(sql, params)
+    con.commit()
+    con.close()
+
+def db_one(sql, params=()):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(sql, params)
+    row = cur.fetchone()
+    con.close()
+    return row
+
+def db_all(sql, params=()):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+    con.close()
+    return rows
+
 def init_db():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
@@ -71,7 +123,6 @@ def init_db():
         last_interesting_at TEXT
     )""")
 
-    # Для реакции 💩 нужно "кол-во триггерных сообщений за сутки"
     cur.execute("""
     CREATE TABLE IF NOT EXISTS daily_trigger_count (
         chat_id INTEGER,
@@ -80,7 +131,7 @@ def init_db():
         PRIMARY KEY(chat_id, day)
     )""")
 
-    # Логи за 7 дней (чтобы считать "за 24ч/7д")
+    # Логи для "последние 24ч / 7д"
     cur.execute("""
     CREATE TABLE IF NOT EXISTS msg_log (
         chat_id INTEGER,
@@ -107,7 +158,7 @@ def init_db():
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_phrase_log_chat_ts ON phrase_log(chat_id, ts)")
 
-    # Кэш имён
+    # Кэш отображаемых имён
     cur.execute("""
     CREATE TABLE IF NOT EXISTS user_cache (
         chat_id INTEGER,
@@ -117,31 +168,43 @@ def init_db():
         PRIMARY KEY(chat_id, user_id)
     )""")
 
+    # Репутация
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS rep (
+        chat_id INTEGER,
+        user_id INTEGER,
+        score INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(chat_id, user_id)
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS rep_votes (
+        chat_id INTEGER,
+        from_user_id INTEGER,
+        to_user_id INTEGER,
+        ts TEXT NOT NULL,
+        PRIMARY KEY(chat_id, from_user_id, to_user_id)
+    )""")
+
+    # Дуэли: state=pending/active/done/cancel
+    # data: JSON со всем состоянием боя
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS duels (
+        chat_id INTEGER,
+        duel_id TEXT PRIMARY KEY,
+        a_id INTEGER NOT NULL,
+        b_id INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        accept_deadline TEXT NOT NULL,
+        play_deadline TEXT,
+        arena_msg_id INTEGER,
+        data TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_duels_chat_state ON duels(chat_id, state)")
+
     con.commit()
     con.close()
-
-def db_exec(sql, params=()):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute(sql, params)
-    con.commit()
-    con.close()
-
-def db_one(sql, params=()):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute(sql, params)
-    row = cur.fetchone()
-    con.close()
-    return row
-
-def db_all(sql, params=()):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    con.close()
-    return rows
 
 def ensure_chat(chat_id: int):
     row = db_one("SELECT chat_id FROM chat_settings WHERE chat_id=?", (chat_id,))
@@ -178,36 +241,17 @@ def set_field(chat_id: int, field: str, value):
         value = value.isoformat()
     db_exec(f"UPDATE chat_settings SET {field}=? WHERE chat_id=?", (value, chat_id))
 
-def inc_daily_trigger(chat_id: int, day: str) -> int:
-    row = db_one("SELECT cnt FROM daily_trigger_count WHERE chat_id=? AND day=?", (chat_id, day))
-    if row is None:
-        db_exec("INSERT INTO daily_trigger_count(chat_id, day, cnt) VALUES(?, ?, 1)", (chat_id, day))
-        return 1
-    cnt = row[0] + 1
-    db_exec("UPDATE daily_trigger_count SET cnt=? WHERE chat_id=? AND day=?", (cnt, chat_id, day))
-    return cnt
+def set_null(chat_id: int, field: str):
+    ensure_chat(chat_id)
+    db_exec(f"UPDATE chat_settings SET {field}=NULL WHERE chat_id=?", (chat_id,))
 
-def upsert_user_display(chat_id: int, user_id: int, display: str, ts: datetime):
-    display = (display or "").strip()
-    if not display:
-        display = f"id:{user_id}"
-    db_exec("""
-    INSERT INTO user_cache(chat_id, user_id, display, updated_at)
-    VALUES(?, ?, ?, ?)
-    ON CONFLICT(chat_id, user_id) DO UPDATE SET
-      display=excluded.display,
-      updated_at=excluded.updated_at
-    """, (chat_id, user_id, display, ts.isoformat()))
-
-def get_user_display(chat_id: int, user_id: int) -> str:
-    row = db_one("SELECT display FROM user_cache WHERE chat_id=? AND user_id=?", (chat_id, user_id))
-    return row[0] if row else f"id:{user_id}"
-
+# =======================
+# STATS LOGGING
+# =======================
 def add_msg_log(chat_id: int, ts: datetime, user_id: int):
     db_exec("INSERT INTO msg_log(chat_id, ts, user_id) VALUES(?, ?, ?)", (chat_id, ts.isoformat(), user_id))
 
 def add_words(chat_id: int, ts: datetime, words):
-    # ограничим шум: слова длиной 1–2 символа можно скипнуть
     for w in words:
         if len(w) < 3:
             continue
@@ -219,7 +263,6 @@ def add_phrase(chat_id: int, ts: datetime, phrase: str):
     db_exec("INSERT INTO phrase_log(chat_id, ts, phrase) VALUES(?, ?, ?)", (chat_id, ts.isoformat(), phrase))
 
 def prune_logs(chat_id: int, cutoff: datetime):
-    # держим только последние 7 дней
     cutoff_s = cutoff.isoformat()
     db_exec("DELETE FROM msg_log WHERE chat_id=? AND ts < ?", (chat_id, cutoff_s))
     db_exec("DELETE FROM word_log WHERE chat_id=? AND ts < ?", (chat_id, cutoff_s))
@@ -257,10 +300,302 @@ def get_user_counts(chat_id: int, since: datetime):
     """, (chat_id, since.isoformat()))
     return rows
 
-def in_window(dt: datetime, start_h: int, end_h: int) -> bool:
-    return start_h <= dt.hour < end_h
+# =======================
+# USER DISPLAY CACHE
+# =======================
+def upsert_user_display(chat_id: int, user_id: int, display: str, ts: datetime):
+    display = (display or "").strip() or f"id:{user_id}"
+    db_exec("""
+    INSERT INTO user_cache(chat_id, user_id, display, updated_at)
+    VALUES(?, ?, ?, ?)
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET
+      display=excluded.display,
+      updated_at=excluded.updated_at
+    """, (chat_id, user_id, display, ts.isoformat()))
 
-# ---------- Background watcher (тишина) ----------
+def get_user_display(chat_id: int, user_id: int) -> str:
+    row = db_one("SELECT display FROM user_cache WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    return row[0] if row else f"id:{user_id}"
+
+def find_user_id_by_username(chat_id: int, username: str) -> int | None:
+    row = db_one("SELECT user_id FROM user_cache WHERE chat_id=? AND display=?", (chat_id, f"@{username}"))
+    return int(row[0]) if row else None
+
+# =======================
+# POOP COUNTER
+# =======================
+def inc_daily_trigger(chat_id: int, day: str) -> int:
+    row = db_one("SELECT cnt FROM daily_trigger_count WHERE chat_id=? AND day=?", (chat_id, day))
+    if row is None:
+        db_exec("INSERT INTO daily_trigger_count(chat_id, day, cnt) VALUES(?, ?, 1)", (chat_id, day))
+        return 1
+    cnt = row[0] + 1
+    db_exec("UPDATE daily_trigger_count SET cnt=? WHERE chat_id=? AND day=?", (cnt, chat_id, day))
+    return cnt
+
+# =======================
+# REPUTATION
+# =======================
+def rep_get(chat_id: int, user_id: int) -> int:
+    row = db_one("SELECT score FROM rep WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    return int(row[0]) if row else 0
+
+def rep_add(chat_id: int, user_id: int, delta: int):
+    db_exec("""
+    INSERT INTO rep(chat_id, user_id, score) VALUES(?, ?, ?)
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET score = score + ?
+    """, (chat_id, user_id, delta, delta))
+
+def rep_can_vote(chat_id: int, from_id: int, to_id: int, now: datetime, cooldown_min: int = REP_COOLDOWN_MIN) -> bool:
+    row = db_one("""
+    SELECT ts FROM rep_votes WHERE chat_id=? AND from_user_id=? AND to_user_id=?
+    """, (chat_id, from_id, to_id))
+    if not row:
+        return True
+    last = datetime.fromisoformat(row[0])
+    return (now - last) >= timedelta(minutes=cooldown_min)
+
+def rep_mark_vote(chat_id: int, from_id: int, to_id: int, now: datetime):
+    db_exec("""
+    INSERT INTO rep_votes(chat_id, from_user_id, to_user_id, ts)
+    VALUES(?, ?, ?, ?)
+    ON CONFLICT(chat_id, from_user_id, to_user_id) DO UPDATE SET ts=excluded.ts
+    """, (chat_id, from_id, to_id, now.isoformat()))
+
+# =======================
+# DUELS (GUNFIGHT)
+# =======================
+ACTION_ALIASES = {
+    "стрелять": "shoot",
+    "выстрел": "shoot",
+    "шут": "shoot",
+    "shoot": "shoot",
+    "прицел": "aim",
+    "целюсь": "aim",
+    "aim": "aim",
+    "уклон": "dodge",
+    "уклониться": "dodge",
+    "dodge": "dodge",
+    "перезарядка": "reload",
+    "перезаряд": "reload",
+    "reload": "reload",
+    "перевязка": "heal",
+    "лечиться": "heal",
+    "heal": "heal",
+}
+
+def duel_new_data(a_id: int, b_id: int) -> dict:
+    return {
+        "round": 1,
+        "players": {
+            str(a_id): {
+                "hp": DUEL_HP,
+                "ammo": DUEL_AMMO_MAX,
+                "acc": DUEL_BASE_ACC,
+                "heal_used": False,
+                "last_action": None
+            },
+            str(b_id): {
+                "hp": DUEL_HP,
+                "ammo": DUEL_AMMO_MAX,
+                "acc": DUEL_BASE_ACC,
+                "heal_used": False,
+                "last_action": None
+            }
+        },
+        "moves": {str(a_id): None, str(b_id): None}
+    }
+
+def duel_create(chat_id: int, a_id: int, b_id: int, now: datetime) -> str:
+    duel_id = str(uuid.uuid4())
+    accept_deadline = now + timedelta(minutes=DUEL_ACCEPT_MIN)
+    data = duel_new_data(a_id, b_id)
+    db_exec("""
+    INSERT INTO duels(chat_id, duel_id, a_id, b_id, state, created_at, accept_deadline, data)
+    VALUES(?, ?, ?, ?, 'pending', ?, ?, ?)
+    """, (chat_id, duel_id, a_id, b_id, now.isoformat(), accept_deadline.isoformat(), json.dumps(data, ensure_ascii=False)))
+    return duel_id
+
+def duel_get(chat_id: int, duel_id: str):
+    row = db_one("""
+    SELECT duel_id, a_id, b_id, state, accept_deadline, play_deadline, arena_msg_id, data
+    FROM duels WHERE chat_id=? AND duel_id=?
+    """, (chat_id, duel_id))
+    return row
+
+def duel_get_pending_for_b(chat_id: int, b_id: int):
+    row = db_one("""
+    SELECT duel_id, a_id, b_id, accept_deadline
+    FROM duels
+    WHERE chat_id=? AND b_id=? AND state='pending'
+    ORDER BY created_at DESC
+    LIMIT 1
+    """, (chat_id, b_id))
+    return row
+
+def duel_set_state(chat_id: int, duel_id: str, state: str):
+    db_exec("UPDATE duels SET state=? WHERE chat_id=? AND duel_id=?", (state, chat_id, duel_id))
+
+def duel_activate(chat_id: int, duel_id: str, now: datetime, arena_msg_id: int):
+    play_deadline = now + timedelta(minutes=DUEL_MOVE_MIN)
+    db_exec("""
+    UPDATE duels
+    SET state='active', play_deadline=?, arena_msg_id=?
+    WHERE chat_id=? AND duel_id=?
+    """, (play_deadline.isoformat(), arena_msg_id, chat_id, duel_id))
+
+def duel_extend_deadline(chat_id: int, duel_id: str, now: datetime):
+    play_deadline = now + timedelta(minutes=DUEL_MOVE_MIN)
+    db_exec("UPDATE duels SET play_deadline=? WHERE chat_id=? AND duel_id=?", (play_deadline.isoformat(), chat_id, duel_id))
+
+def duel_get_active_by_arena(chat_id: int, arena_msg_id: int):
+    row = db_one("""
+    SELECT duel_id, a_id, b_id, play_deadline, data
+    FROM duels
+    WHERE chat_id=? AND arena_msg_id=? AND state='active'
+    """, (chat_id, arena_msg_id))
+    return row
+
+def duel_update_data(chat_id: int, duel_id: str, data: dict):
+    db_exec("UPDATE duels SET data=? WHERE chat_id=? AND duel_id=?", (json.dumps(data, ensure_ascii=False), chat_id, duel_id))
+
+def parse_duel_target_username(text: str) -> str | None:
+    m = re.search(r"дуэль\s+@([A-Za-z0-9_]+)", text, re.IGNORECASE)
+    return m.group(1) if m else None
+
+def parse_action(text: str) -> str | None:
+    t = (text or "").strip().lower()
+    return ACTION_ALIASES.get(t)
+
+def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
+    a = data["players"][str(a_id)]
+    b = data["players"][str(b_id)]
+    a_name = get_user_display(chat_id, a_id)
+    b_name = get_user_display(chat_id, b_id)
+
+    def p_line(name, p):
+        acc = int(p["acc"] * 100)
+        return f"{name}: ❤{p['hp']} | 🔫{p['ammo']} | 🎯{acc}% | 🩹{'да' if p['heal_used'] else 'нет'}"
+
+    return (
+        f"Раунд {data['round']}\n"
+        f"{p_line(a_name, a)}\n"
+        f"{p_line(b_name, b)}\n\n"
+        "Ходы (ответом на это сообщение): стрелять / прицел / уклон / перезарядка / перевязка"
+    )
+
+def clamp(x, lo, hi):
+    return lo if x < lo else hi if x > hi else x
+
+def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: dict) -> tuple[str, bool]:
+    """
+    Возвращает (result_text, finished)
+    """
+    pA = data["players"][str(a_id)]
+    pB = data["players"][str(b_id)]
+    mA = data["moves"][str(a_id)]
+    mB = data["moves"][str(b_id)]
+
+    a_name = get_user_display(chat_id, a_id)
+    b_name = get_user_display(chat_id, b_id)
+
+    # Нормализация "не выбрал" — считаем как уклон (чтобы игра не стопорилась)
+    if mA is None:
+        mA = "dodge"
+    if mB is None:
+        mB = "dodge"
+
+    # Применяем небоевые действия сначала
+    log = []
+
+    def apply_action(pid, action, me, opp_name):
+        nonlocal log
+        if action == "aim":
+            me["acc"] = clamp(me["acc"] + DUEL_AIM_BONUS, DUEL_BASE_ACC, DUEL_MAX_ACC)
+            log.append(f"{opp_name}: прицеливается.")
+        elif action == "reload":
+            me["ammo"] = DUEL_AMMO_MAX
+            log.append(f"{opp_name}: перезаряжается.")
+        elif action == "heal":
+            if me["heal_used"]:
+                log.append(f"{opp_name}: пытался перевязаться, но уже использовал.")
+            else:
+                me["heal_used"] = True
+                me["hp"] = clamp(me["hp"] + DUEL_HEAL_AMOUNT, 0, DUEL_HP)
+                log.append(f"{opp_name}: перевязка (+{DUEL_HEAL_AMOUNT}❤).")
+        elif action == "dodge":
+            log.append(f"{opp_name}: уходит в уклон.")
+        elif action == "shoot":
+            # стрельбу отдельно
+            pass
+
+    # Сначала применяем всем aim/reload/heal/dodge (shoot позже)
+    apply_action(a_id, mA, pA, a_name)
+    apply_action(b_id, mB, pB, b_name)
+
+    # Затем стрельба
+    def shoot(shooter_name, shooter, target_name, target, target_action):
+        nonlocal log
+        if shooter["ammo"] <= 0:
+            log.append(f"{shooter_name}: щёлк — патроны кончились.")
+            return False
+        shooter["ammo"] -= 1
+
+        chance = shooter["acc"]
+        if target_action == "dodge":
+            chance = clamp(chance - DUEL_DODGE_PENALTY, 0.05, 0.95)
+
+        hit = random.random() < chance
+        if hit:
+            target["hp"] = max(0, target["hp"] - 1)
+            log.append(f"{shooter_name}: попал по {target_name}. (-1❤)")
+        else:
+            log.append(f"{shooter_name}: промахнулся.")
+        return hit
+
+    # Оба могут стрелять в одном раунде
+    if mA == "shoot":
+        shoot(a_name, pA, b_name, pB, mB)
+    if mB == "shoot":
+        shoot(b_name, pB, a_name, pA, mA)
+
+    # Проверка победы
+    finished = False
+    result = ""
+
+    if pA["hp"] <= 0 and pB["hp"] <= 0:
+        finished = True
+        result = "Оба падают. Ничья."
+    elif pA["hp"] <= 0:
+        finished = True
+        rep_add(chat_id, b_id, DUEL_REP_REWARD)
+        score = rep_get(chat_id, b_id)
+        result = f"Победа {b_name}. +{DUEL_REP_REWARD} репутации (итого {score})."
+    elif pB["hp"] <= 0:
+        finished = True
+        rep_add(chat_id, a_id, DUEL_REP_REWARD)
+        score = rep_get(chat_id, a_id)
+        result = f"Победа {a_name}. +{DUEL_REP_REWARD} репутации (итого {score})."
+    else:
+        # следующий раунд
+        data["round"] += 1
+        data["moves"][str(a_id)] = None
+        data["moves"][str(b_id)] = None
+
+    # Собираем текст
+    body = "\n".join(log) if log else "Тишина."
+    if finished:
+        text = f"{body}\n\n{result}"
+        return text, True
+
+    # промежуточный статус
+    status = duel_status_text(chat_id, a_id, b_id, data)
+    text = f"{body}\n\n{status}"
+    return text, False
+
+# =======================
+# SILENCE WATCHER
+# =======================
 async def background_silence_watcher(bot: Bot):
     while True:
         try:
@@ -276,7 +611,7 @@ async def background_silence_watcher(bot: Bot):
 
                 last_msg = s["last_message_at"]
 
-                # 03:00-12:00: если до 12:00 не писали (с 03:00)
+                # 03:00-12:00: если с 03:00 не было сообщений → в 12:00 пишем
                 if now.hour == 12 and now.minute <= 5:
                     marker = now.replace(hour=3, minute=0, second=0, microsecond=0)
                     already = s["last_interesting_at"]
@@ -285,7 +620,7 @@ async def background_silence_watcher(bot: Bot):
                             await bot.send_message(chat_id, "интересный сегодня чат")
                             set_field(chat_id, "last_interesting_at", now)
 
-                # 10:00-24:00: если тишина 5 часов
+                # 10:00-24:00: если тишина 5 часов → "где все?"
                 if in_window(now, 10, 24) and last_msg is not None:
                     if now - last_msg >= timedelta(hours=5):
                         last_where = s["last_where_all_at"]
@@ -293,28 +628,45 @@ async def background_silence_watcher(bot: Bot):
                             await bot.send_message(chat_id, "где все?")
                             set_field(chat_id, "last_where_all_at", now)
 
-                # чистка логов (раз в минуту — норм, объёмы маленькие)
+                # чистка логов
                 prune_logs(chat_id, now - timedelta(days=7))
 
+                # таймаут активных дуэлей (если зависли)
+                # Если deadline прошёл — отменяем
+                active_duels = db_all("""
+                    SELECT duel_id, play_deadline
+                    FROM duels
+                    WHERE chat_id=? AND state='active'
+                """, (chat_id,))
+                for duel_id, play_deadline in active_duels:
+                    if play_deadline:
+                        dl = datetime.fromisoformat(play_deadline)
+                        if now > dl:
+                            duel_set_state(chat_id, duel_id, "cancel")
+                            # можно не спамить сообщением, но если хочешь — раскомментируй:
+                            # await bot.send_message(chat_id, "Дуэль истекла по времени.")
         except Exception:
             pass
 
         await asyncio.sleep(60)
 
-# ---------- Main ----------
+# =======================
+# MAIN
+# =======================
 async def main():
-    token = os.environ.get("BOT_TOKEN")
-    if not token:
+    if not TOKEN:
         raise RuntimeError("Set BOT_TOKEN env var")
 
     init_db()
-    bot = Bot(token)
+    bot = Bot(TOKEN)
     dp = Dispatcher()
 
+    # -------- Commands: on/off/quiet/hype/stat --------
     @dp.message(Command("on"))
     async def cmd_on(message: Message):
         ensure_chat(message.chat.id)
         set_field(message.chat.id, "enabled", 1)
+        set_null(message.chat.id, "quiet_until") # важный фикс: /on снимает quiet
         await message.answer("Ок. Включен.")
 
     @dp.message(Command("off"))
@@ -329,10 +681,14 @@ async def main():
         s = get_settings(message.chat.id)
         tz = s["tz"]
         parts = (message.text or "").split()
-        if len(parts) < 2 or not parts[1].isdigit():
-            await message.answer("Формат: /quiet N (часов)")
+        if len(parts) < 2 or not re.fullmatch(r"-?\d+", parts[1] or ""):
+            await message.answer("Формат: /quiet N (часов). Для снятия: /quiet 0")
             return
         hours = int(parts[1])
+        if hours <= 0:
+            set_null(message.chat.id, "quiet_until")
+            await message.answer("Ок. Снова говорю.")
+            return
         until = now_tz(tz) + timedelta(hours=hours)
         set_field(message.chat.id, "quiet_until", until)
         await message.answer(f"Ок. Молчу до {until.strftime('%Y-%m-%d %H:%M')}")
@@ -373,7 +729,7 @@ async def main():
                 return "—"
             out = []
             for uid, c in rows[:limit]:
-                name = get_user_display(message.chat.id, uid)
+                name = get_user_display(message.chat.id, int(uid))
                 out.append(f"- {name}: {c}")
             return "\n".join(out)
 
@@ -385,6 +741,7 @@ async def main():
             "Сообщения по юзерам (7д):\n" + fmt_users(users7)
         )
 
+    # -------- Main message handler --------
     @dp.message(F.text)
     async def on_text(message: Message):
         chat_id = message.chat.id
@@ -396,42 +753,192 @@ async def main():
         # фиксируем последнее сообщение
         set_field(chat_id, "last_message_at", now)
 
-        # кэш имени
+        # кешируем имя
         u = message.from_user
-        display = u.username or " ".join([x for x in [u.first_name, u.last_name] if x]).strip() or f"id:{u.id}"
+        display = ""
         if u.username:
             display = f"@{u.username}"
+        else:
+            display = " ".join([x for x in [u.first_name, u.last_name] if x]).strip()
         upsert_user_display(chat_id, u.id, display, now)
 
         text = message.text or ""
+        tlow = text.strip().lower()
 
-        # не учитываем команды в логи/статы
+        # команды не логируем
         if text.startswith("/"):
             return
 
-        # логи для статистики/хайпа
+        # логируем статистику/хайп всегда (даже в quiet/off)
         add_msg_log(chat_id, now, u.id)
         add_words(chat_id, now, tokenize(text))
         add_phrase(chat_id, now, normalize_phrase(text))
+        prune_logs(chat_id, now - timedelta(days=7))
 
-        # если бот выключен или quiet — не делает действий, но статистику собирает
+        # если bot выключен или quiet — не делает реакций/пасхалок/эхо/дуэлей
         quiet_until = s["quiet_until"]
         if (not s["enabled"]) or (quiet_until and now < quiet_until):
             return
 
-        # пасхалка 1% (с кулдауном)
+        # =======================
+        # 1) REPUTATION via reply "+" or "-"
+        # =======================
+        if message.reply_to_message and tlow in ("+", "-"):
+            if tlow == "-" and not ALLOW_NEGATIVE_REP:
+                return
+            target_user = message.reply_to_message.from_user
+            if not target_user or not target_user.id:
+                return
+            if target_user.id == u.id:
+                return
+
+            delta = 1 if tlow == "+" else -1
+            if not rep_can_vote(chat_id, u.id, target_user.id, now, cooldown_min=REP_COOLDOWN_MIN):
+                return
+
+            rep_add(chat_id, target_user.id, delta)
+            rep_mark_vote(chat_id, u.id, target_user.id, now)
+
+            score = rep_get(chat_id, target_user.id)
+            name = get_user_display(chat_id, target_user.id)
+            sign = "+1" if delta > 0 else "-1"
+            await message.answer(f"{sign} репутация {name}\nРепутация: {score}")
+            return
+
+        # =======================
+        # 2) DUEL: start
+        # =======================
+        if tlow.startswith("дуэль"):
+            target_id = None
+
+            # reply target
+            if message.reply_to_message and message.reply_to_message.from_user:
+                target_id = message.reply_to_message.from_user.id
+            else:
+                # duel @username
+                uname = parse_duel_target_username(text)
+                if uname:
+                    target_id = find_user_id_by_username(chat_id, uname)
+
+            if not target_id:
+                await message.answer("Кого в дуэль? Ответь на сообщение или: дуэль @username")
+                return
+            if target_id == u.id:
+                return
+
+            duel_id = duel_create(chat_id, u.id, target_id, now)
+            a_name = get_user_display(chat_id, u.id)
+            b_name = get_user_display(chat_id, target_id)
+
+            await message.answer(
+                f"{a_name} вызывает {b_name} на дуэль.\n"
+                f"{b_name}, напиши: принял / отказ"
+            )
+            return
+
+        # =======================
+        # 3) DUEL: accept/decline
+        # =======================
+        if tlow in ("принял", "принято", "го", "ок", "да"):
+            pend = duel_get_pending_for_b(chat_id, u.id)
+            if pend:
+                duel_id, a_id, b_id, accept_deadline = pend
+                if now > datetime.fromisoformat(accept_deadline):
+                    duel_set_state(chat_id, duel_id, "cancel")
+                    return
+
+                # создаём "арену"
+                data_row = duel_get(chat_id, duel_id)
+                _, a_id2, b_id2, _, _, _, _, data_json = data_row[0], data_row[1], data_row[2], data_row[3], data_row[4], data_row[5], data_row[6], data_row[7]
+                data = json.loads(data_json) if data_json else duel_new_data(a_id2, b_id2)
+                arena_text = duel_status_text(chat_id, a_id2, b_id2, data)
+
+                arena_msg = await message.answer("ДУЭЛЬ\n\n" + arena_text)
+                duel_activate(chat_id, duel_id, now, arena_msg.message_id)
+                return
+
+        if tlow in ("отказ", "нет", "пас", "не"):
+            pend = duel_get_pending_for_b(chat_id, u.id)
+            if pend:
+                duel_id, *_ = pend
+                duel_set_state(chat_id, duel_id, "cancel")
+                await message.answer("Дуэль отменена.")
+            return
+
+        # =======================
+        # 4) DUEL: moves (reply to arena message)
+        # =======================
+        if message.reply_to_message:
+            arena_id = message.reply_to_message.message_id
+            active = duel_get_active_by_arena(chat_id, arena_id)
+            if active:
+                duel_id, a_id, b_id, play_deadline, data_json = active
+                if play_deadline and now > datetime.fromisoformat(play_deadline):
+                    duel_set_state(chat_id, duel_id, "cancel")
+                    await message.answer("Дуэль истекла по времени.")
+                    return
+
+                action = parse_action(text)
+                if not action:
+                    await message.answer("Не понял. Действия: стрелять / прицел / уклон / перезарядка / перевязка")
+                    return
+
+                if u.id not in (a_id, b_id):
+                    return
+
+                data = json.loads(data_json) if data_json else duel_new_data(a_id, b_id)
+
+                # Запрет повторного хода в раунде
+                if data["moves"].get(str(u.id)) is not None:
+                    return
+
+                # Валидация действий по ресурсам
+                me = data["players"][str(u.id)]
+                if action == "shoot" and me["ammo"] <= 0:
+                    await message.answer("Патроны кончились. Перезарядка.")
+                    return
+                if action == "heal" and me["heal_used"]:
+                    await message.answer("Перевязка уже была.")
+                    return
+
+                data["moves"][str(u.id)] = action
+                me["last_action"] = action
+
+                duel_update_data(chat_id, duel_id, data)
+
+                # Если оба выбрали — резолвим
+                if data["moves"][str(a_id)] is not None and data["moves"][str(b_id)] is not None:
+                    result_text, finished = duel_resolve_round(chat_id, duel_id, a_id, b_id, data)
+                    duel_update_data(chat_id, duel_id, data)
+
+                    if finished:
+                        duel_set_state(chat_id, duel_id, "done")
+                        await message.answer(result_text)
+                    else:
+                        duel_extend_deadline(chat_id, duel_id, now)
+                        await message.answer(result_text)
+
+                return
+
+        # =======================
+        # 5) Пасхалка 1% (кулдаун)
+        # =======================
         if random.random() < EASTER_PROB:
             last_e = s["last_easter_at"]
             if (last_e is None) or (now - last_e >= timedelta(minutes=MIN_EASTER_EVERY_MIN)):
                 await message.answer("Я запомнил это сообщение навсегда...")
                 set_field(chat_id, "last_easter_at", now)
 
-        # эхо 0.5%
+        # =======================
+        # 6) Эхо 0.5%
+        # =======================
         if random.random() < ECHO_PROB:
-            if text and not text.endswith("..."):
+            if text and not text.strip().endswith("..."):
                 await message.reply(text.strip() + "...")
 
-        # 💩 по триггерам
+        # =======================
+        # 7) 💩 по триггерам (после 5/день -> 25%)
+        # =======================
         if has_trigger(text):
             day = date_key(now)
             cnt = inc_daily_trigger(chat_id, day)
@@ -444,10 +951,11 @@ async def main():
                         reaction=[ReactionTypeEmoji(emoji="💩")]
                     )
                 except Exception:
-                    # если в группе реакции запрещены / у бота нет прав — просто молчим
                     pass
 
-        # авто-hype 1% (с кулдауном)
+        # =======================
+        # 8) Авто-hype 1% (кулдаун 6ч)
+        # =======================
         if random.random() < AUTO_HYPE_PROB:
             last_h = s["last_autohype_at"]
             if (last_h is None) or (now - last_h >= timedelta(hours=MIN_AUTOHYPE_EVERY_HOURS)):
