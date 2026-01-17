@@ -609,7 +609,7 @@ def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
             "heal": "🩹 перевязка",
         }.get(a, a)
 
-    def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
+    def moved(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
         a = data["players"][str(a_id)]
         b = data["players"][str(b_id)]
         a_name = get_user_display(chat_id, a_id)
