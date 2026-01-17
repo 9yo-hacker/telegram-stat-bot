@@ -913,10 +913,16 @@ async def main():
 
                     if finished:
                         duel_set_state(chat_id, duel_id, "done")
-                        await message.answer(result_text)
+                        await message.reply_to_message.edit_text(
+                            result_text,
+                            parse_mode="HTML"
+                        )
+
                     else:
-                        duel_extend_deadline(chat_id, duel_id, now)
-                        await message.answer(result_text)
+                        await message.reply_to_message.edit_text(
+                            result_text,
+                            parse_mode="HTML"
+                        )
 
                 return
 
