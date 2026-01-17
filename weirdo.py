@@ -403,7 +403,8 @@ def duel_new_data(a_id: int, b_id: int) -> dict:
                 "last_action": None
             }
         },
-        "moves": {str(a_id): None, str(b_id): None}
+        "moves": {str(a_id): None, str(b_id): None},
+        "bot_msgs": []  # сюда будем пушить message_id всех сообщений арены/результата
     }
 
 def duel_create(chat_id: int, a_id: int, b_id: int, now: datetime) -> str:
@@ -435,6 +436,13 @@ def duel_get_pending_for_b(chat_id: int, b_id: int):
 
 def duel_set_state(chat_id: int, duel_id: str, state: str):
     db_exec("UPDATE duels SET state=? WHERE chat_id=? AND duel_id=?", (state, chat_id, duel_id))
+
+def duel_set_arena(chat_id: int, duel_id: str, arena_msg_id: int):
+    db_exec("""
+    UPDATE duels
+    SET arena_msg_id=?
+    WHERE chat_id=? AND duel_id=?
+    """, (arena_msg_id, chat_id, duel_id))
 
 def duel_activate(chat_id: int, duel_id: str, now: datetime, arena_msg_id: int):
     play_deadline = now + timedelta(minutes=DUEL_MOVE_MIN)
@@ -855,6 +863,9 @@ async def main():
 
                 arena_msg = await message.answer("ДУЭЛЬ\n\n" + arena_text)
                 duel_activate(chat_id, duel_id, now, arena_msg.message_id)
+                
+                data["bot_msgs"].append(arena_msg.message_id)
+                duel_update_data(chat_id, duel_id, data)
                 return
 
         if tlow in ("отказ", "нет", "пас", "не"):
@@ -909,22 +920,27 @@ async def main():
                 # Если оба выбрали — резолвим
                 if data["moves"][str(a_id)] is not None and data["moves"][str(b_id)] is not None:
                     result_text, finished = duel_resolve_round(chat_id, duel_id, a_id, b_id, data)
+                    
+                    # сохраняем обновлённые данные (round++, hp, ammo и т.д.)
                     duel_update_data(chat_id, duel_id, data)
+
+                    # отправляем НОВОЕ сообщение арены (важно!)
+                    new_msg = await bot.send_message(chat_id, "ДУЭЛЬ\n\n" + result_text, parse_mode="HTML")
+
+                    # запоминаем, что это сообщение относится к дуэли
+                    data["bot_msgs"].append(new_msg.message_id)
+                    duel_update_data(chat_id, duel_id, data)
+
+                    # теперь текущая арена = новое сообщение
+                    duel_set_arena(chat_id, duel_id, new_msg.message_id)
 
                     if finished:
                         duel_set_state(chat_id, duel_id, "done")
-                        await message.reply_to_message.edit_text(
-                            result_text,
-                            parse_mode="HTML"
-                        )
-
                     else:
-                        await message.reply_to_message.edit_text(
-                            result_text,
-                            parse_mode="HTML"
-                        )
+                        duel_extend_deadline(chat_id, duel_id, now)
 
-                return
+                    return
+
 
         # =======================
         # 5) Пасхалка 1% (кулдаун)
