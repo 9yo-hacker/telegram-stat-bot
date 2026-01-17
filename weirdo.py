@@ -695,24 +695,69 @@ async def background_silence_watcher(bot: Bot):
                 # чистка логов
                 prune_logs(chat_id, now - timedelta(days=7))
 
-                # таймаут активных дуэлей (если зависли)
-                # Если deadline прошёл — отменяем
+                # --- duel deadline watcher (based on data["deadline"]) ---
                 active_duels = db_all("""
-                    SELECT duel_id, play_deadline
+                    SELECT duel_id, a_id, b_id, arena_msg_id, data
                     FROM duels
-                    WHERE chat_id=? AND state='active'
+                    WHERE chat_id=? AND state='active' AND arena_msg_id IS NOT NULL
                 """, (chat_id,))
-                for duel_id, play_deadline in active_duels:
-                    if play_deadline:
-                        dl = datetime.fromisoformat(play_deadline)
-                        if now > dl:
-                            duel_set_state(chat_id, duel_id, "cancel")
-                            # можно не спамить сообщением, но если хочешь — раскомментируй:
-                            # await bot.send_message(chat_id, "Дуэль истекла по времени.")
+
+                for duel_id, a_id, b_id, arena_msg_id, data_json in active_duels:
+                    if not data_json:
+                        continue
+                    try:
+                        data = json.loads(data_json)
+                    except Exception:
+                        continue
+
+                    dl_s = data.get("deadline")
+                    if not dl_s:
+                        continue
+
+                    try:
+                        dl = datetime.fromisoformat(dl_s)
+                    except Exception:
+                        continue
+
+                    if now > dl:
+                        # если кто-то не походил — считаем его ход dodge и резолвим
+                        if data["moves"].get(str(a_id)) is None:
+                            data["moves"][str(a_id)] = "dodge"
+                        if data["moves"].get(str(b_id)) is None:
+                            data["moves"][str(b_id)] = "dodge"
+
+                        result_text, finished = duel_resolve_round(chat_id, duel_id, a_id, b_id, data)
+
+                        if finished:
+                            duel_set_state(chat_id, duel_id, "done")
+                            duel_update_data(chat_id, duel_id, data)
+                            try:
+                                await bot.edit_message_text(
+                                    chat_id=chat_id,
+                                    message_id=arena_msg_id,
+                                    text="ДУЭЛЬ\n\n" + result_text
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            data["round_seconds"] = max(DUEL_ROUND_SECONDS_MIN, int(data["round_seconds"]) - DUEL_ROUND_SECONDS_DEC)
+                            duel_start_round(data, now, a_id, b_id)
+                            duel_update_data(chat_id, duel_id, data)
+                            try:
+                                arena_text = duel_status_text(chat_id, a_id, b_id, data)
+                                await bot.edit_message_text(
+                                    chat_id=chat_id,
+                                    message_id=arena_msg_id,
+                                    text="ДУЭЛЬ\n\n" + arena_text,
+                                    reply_markup=kb_duel_actions(duel_id)
+                                )
+                            except Exception:
+                                pass
+
         except Exception:
             pass
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(5)
 
 # =======================
 # MAIN
@@ -857,9 +902,12 @@ async def main():
 
     @dp.callback_query(F.data.startswith("duel:act:"))
     async def cb_duel_act(q: CallbackQuery):
+        await q.answer()  # чтобы не висела кнопка даже если дальше ошибка
+
         # duel:act:<duel_id>:<action>
         _, _, duel_id, action = q.data.split(":", 3)
         chat_id = q.message.chat.id
+        user_id = q.from_user.id   # <-- ВОТ ЭТО ДОЛЖНО БЫТЬ ДО ПРОВЕРОК
 
         active = duel_get_active_by_arena(chat_id, q.message.message_id)
         if not active:
@@ -867,9 +915,11 @@ async def main():
             return
 
         duel_id_db, a_id, b_id, play_deadline, data_json = active
+
         if duel_id_db != duel_id:
             await q.answer("Не тот бой", show_alert=True)
             return
+
         if user_id not in (a_id, b_id):
             await q.answer("Ты не участник", show_alert=True)
             return
