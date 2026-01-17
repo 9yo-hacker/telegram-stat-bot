@@ -461,6 +461,15 @@ ACTION_ALIASES = {
     "heal": "heal",
 }
 
+def act_name(action: str) -> str:
+    return {
+        "aim": "🎯 прицел",
+        "reload": "🔄 перезарядка",
+        "heal": "🩹 перевязка",
+        "dodge": "🕺 уклон",
+        "shoot": "🔫 выстрел",
+    }.get(action, action)
+
 def kb_duel_actions(duel_id: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🔫 Стрелять", callback_data=f"duel:act:{duel_id}:shoot")
@@ -496,6 +505,8 @@ def duel_new_data(a_id: int, b_id: int) -> dict:
             }
         },
         "moves": {str(a_id): None, str(b_id): None},
+        "last_round_log": "",
+        "last_moves": {str(a_id): None, str(b_id): None},
         "bot_msgs": []  # сюда будем пушить message_id всех сообщений арены/результата
     }
 
@@ -598,8 +609,33 @@ def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
             "heal": "🩹 перевязка",
         }.get(a, a)
 
-    def moved(uid: int) -> str:
-        return "✅ походил" if data["moves"].get(str(uid)) else "⏳ ждёт"
+    def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
+        a = data["players"][str(a_id)]
+        b = data["players"][str(b_id)]
+        a_name = get_user_display(chat_id, a_id)
+        b_name = get_user_display(chat_id, b_id)
+
+        def move_badge(uid: int) -> str:
+            act = data["moves"].get(str(uid))
+            if act:
+                return f"✅ {act_name(act)}"
+            return "⏳ ждёт"
+
+        def p_line(name, p, uid):
+            acc = int(p["acc"] * 100)
+            return f"{name}: ❤{p['hp']} | 🔫{p['ammo']} | 🎯{acc}% | 🩹{'да' if p['heal_used'] else 'нет'} | {move_badge(uid)}"
+
+        last = data.get("last_round_log", "").strip()
+        last_block = f"Прошлый раунд:\n{last}\n\n" if last else ""
+
+        return (
+            f"{last_block}"
+            f"Раунд {data['round']}\n"
+            f"Время на ход: {data.get('round_seconds', DUEL_ROUND_SECONDS_START)}s\n\n"
+            f"{p_line(a_name, a, a_id)}\n"
+            f"{p_line(b_name, b, b_id)}\n\n"
+            "Жми кнопки ниже 👇"
+        )
 
     deadline_str = ""
     if data.get("deadline"):
@@ -748,6 +784,13 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
     # эпик иногда, не всегда
     if epic and random.random() < DUEL_EPIC_PROB:
         log.append(epic)
+
+    # сохранить историю прошлого раунда
+    data["last_moves"][str(a_id)] = mA
+    data["last_moves"][str(b_id)] = mB
+
+    # короткий лог прошлого раунда (без статуса)
+    data["last_round_log"] = body
 
     # 4) победа / следующий раунд
     finished = False
@@ -1024,97 +1067,104 @@ async def main():
 
     @dp.callback_query(F.data.startswith("duel:act:"))
     async def cb_duel_act(q: CallbackQuery):
-        await q.answer()  # чтобы не висела кнопка даже если дальше ошибка
+        await q.answer("✔")  # чтобы не висела кнопка даже если дальше ошибка
+        try:
+            # duel:act:<duel_id>:<action>
+            _, _, duel_id, action = q.data.split(":", 3)
+            chat_id = q.message.chat.id
+            user_id = q.from_user.id   # <-- ВОТ ЭТО ДОЛЖНО БЫТЬ ДО ПРОВЕРОК
 
-        # duel:act:<duel_id>:<action>
-        _, _, duel_id, action = q.data.split(":", 3)
-        chat_id = q.message.chat.id
-        user_id = q.from_user.id   # <-- ВОТ ЭТО ДОЛЖНО БЫТЬ ДО ПРОВЕРОК
-
-        active = duel_get_active_by_arena(chat_id, q.message.message_id)
-        if not active:
-            await q.answer("Неактуально", show_alert=True)
-            return
-
-        duel_id_db, a_id, b_id, play_deadline, data_json = active
-
-        if duel_id_db != duel_id:
-            await q.answer("Не тот бой", show_alert=True)
-            return
-
-        if user_id not in (a_id, b_id):
-            await q.answer("Ты не участник", show_alert=True)
-            return
-
-        s = get_settings(chat_id)
-        now_dt = now_tz(s["tz"])
-        data = json.loads(data_json) if data_json else duel_new_data(a_id, b_id)
-
-        # дедлайн раунда
-        if data.get("deadline"):
-            dl = datetime.fromisoformat(data["deadline"])
-            if now_dt > dl:
-                duel_set_state(chat_id, duel_id, "done")
-                await q.message.edit_text("ДУЭЛЬ\n\nВремя вышло. Дуэль завершена.", reply_markup=None)
-                await q.answer("Время вышло", show_alert=True)
+            active = duel_get_active_by_arena(chat_id, q.message.message_id)
+            if not active:
+                await q.answer("Неактуально", show_alert=True)
                 return
 
-        # surrender
-        if action == "surrender":
-            winner = b_id if user_id == a_id else a_id
-            rep_add(chat_id, winner, DUEL_REP_REWARD)
-            score = rep_get(chat_id, winner)
-            winner_name = get_user_display(chat_id, winner)
-            loser_name = get_user_display(chat_id, user_id)
+            duel_id_db, a_id, b_id, play_deadline, data_json = active
 
-            duel_set_state(chat_id, duel_id, "done")
-            await q.message.edit_text(
-                f"ДУЭЛЬ\n\n{loser_name} сдался. Победа {winner_name}. +{DUEL_REP_REWARD} репутации (итого {score}).",
-                reply_markup=None
-            )
-            await q.answer("Ок")
-            return
+            if duel_id_db != duel_id:
+                await q.answer("Не тот бой", show_alert=True)
+                return
 
-        # уже походил
-        if data["moves"].get(str(user_id)) is not None:
-            await q.answer("Ты уже походил")
-            return
+            if user_id not in (a_id, b_id):
+                await q.answer("Ты не участник", show_alert=True)
+                return
 
-        me = data["players"][str(user_id)]
-        if action == "shoot" and me["ammo"] <= 0:
-            await q.answer("Патроны кончились")
-            return
-        if action == "heal" and me["heal_used"]:
-            await q.answer("Перевязка уже была")
-            return
+            s = get_settings(chat_id)
+            now_dt = now_tz(s["tz"])
+            data = json.loads(data_json) if data_json else duel_new_data(a_id, b_id)
 
-        # записать ход
-        data["moves"][str(user_id)] = action
-        duel_update_data(chat_id, duel_id, data)
+            # дедлайн раунда
+            if data.get("deadline"):
+                dl = datetime.fromisoformat(data["deadline"])
+                if now_dt > dl:
+                    duel_set_state(chat_id, duel_id, "done")
+                    await q.message.edit_text("ДУЭЛЬ\n\nВремя вышло. Дуэль завершена.", reply_markup=None)
+                    await q.answer("Время вышло", show_alert=True)
+                    return
 
-        # обновить арену, чтобы видно ✅/⏳
-        arena_text = duel_status_text(chat_id, a_id, b_id, data)
-        await q.message.edit_text("ДУЭЛЬ\n\n" + arena_text, reply_markup=kb_duel_actions(duel_id))
+            # surrender
+            if action == "surrender":
+                winner = b_id if user_id == a_id else a_id
+                rep_add(chat_id, winner, DUEL_REP_REWARD)
+                score = rep_get(chat_id, winner)
+                winner_name = get_user_display(chat_id, winner)
+                loser_name = get_user_display(chat_id, user_id)
 
-        # если оба походили — резолв
-        if data["moves"][str(a_id)] is not None and data["moves"][str(b_id)] is not None:
-            result_text, finished = duel_resolve_round(chat_id, duel_id, a_id, b_id, data)
+                duel_set_state(chat_id, duel_id, "done")
+                await q.message.edit_text(
+                    f"ДУЭЛЬ\n\n{loser_name} сдался. Победа {winner_name}. +{DUEL_REP_REWARD} репутации (итого {score}).",
+                    reply_markup=None
+                )
+                await q.answer("Ок")
+                return
+
+            # уже походил
+            if data["moves"].get(str(user_id)) is not None:
+                await q.answer("Ты уже походил")
+                return
+
+            me = data["players"][str(user_id)]
+            if action == "shoot" and me["ammo"] <= 0:
+                await q.answer("Патроны кончились")
+                return
+            if action == "heal" and me["heal_used"]:
+                await q.answer("Перевязка уже была")
+                return
+
+            # записать ход
+            data["moves"][str(user_id)] = action
             duel_update_data(chat_id, duel_id, data)
 
-            if finished:
-                duel_set_state(chat_id, duel_id, "done")
-                await q.message.edit_text("ДУЭЛЬ\n\n" + result_text, reply_markup=None)
-            else:
-                # уменьшаем время
-                data["round_seconds"] = max(DUEL_ROUND_SECONDS_MIN, int(data["round_seconds"]) - DUEL_ROUND_SECONDS_DEC)
-                duel_start_round(data, now_dt, a_id, b_id)
+            # обновить арену, чтобы видно ✅/⏳
+            arena_text = duel_status_text(chat_id, a_id, b_id, data)
+            await q.message.edit_text("ДУЭЛЬ\n\n" + arena_text, reply_markup=kb_duel_actions(duel_id))
+
+            # если оба походили — резолв
+            if data["moves"][str(a_id)] is not None and data["moves"][str(b_id)] is not None:
+                result_text, finished = duel_resolve_round(chat_id, duel_id, a_id, b_id, data)
                 duel_update_data(chat_id, duel_id, data)
 
-                arena_text = duel_status_text(chat_id, a_id, b_id, data)
-                await q.message.edit_text("ДУЭЛЬ\n\n" + arena_text, reply_markup=kb_duel_actions(duel_id))
+                if finished:
+                    duel_set_state(chat_id, duel_id, "done")
+                    await q.message.edit_text("ДУЭЛЬ\n\n" + result_text, reply_markup=None)
+                else:
+                    # уменьшаем время
+                    data["round_seconds"] = max(DUEL_ROUND_SECONDS_MIN, int(data["round_seconds"]) - DUEL_ROUND_SECONDS_DEC)
+                    duel_start_round(data, now_dt, a_id, b_id)
+                    duel_update_data(chat_id, duel_id, data)
 
-        await q.answer("Ок")
+                    arena_text = duel_status_text(chat_id, a_id, b_id, data)
+                    await q.message.edit_text("ДУЭЛЬ\n\n" + arena_text, reply_markup=kb_duel_actions(duel_id))
 
+            await q.answer("Ок")
+        except Exception as e:
+            # чтобы не молчал
+            try:
+                await q.message.answer(f"Ошибка дуэли: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+            raise
+        
     # -------- Main message handler --------
     @dp.message(F.text)
     async def on_text(message: Message):
