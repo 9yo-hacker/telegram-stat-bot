@@ -440,6 +440,50 @@ def rep_mark_vote(chat_id: int, from_id: int, to_id: int, now: datetime):
     """, (chat_id, from_id, to_id, now.isoformat()))
 
 # =======================
+# TELEGRAM EDIT THROTTLE
+# =======================
+EDIT_MIN_INTERVAL_SEC = 1.2  # можно 1.0–2.0
+_last_edit_at = {}           # key: (chat_id, message_id) -> datetime
+_last_edit_text = {}         # key: (chat_id, message_id) -> str
+
+async def safe_edit_text(msg, text: str, reply_markup=None):
+    """
+    Редактирует сообщение, но:
+    - не чаще чем раз в EDIT_MIN_INTERVAL_SEC
+    - не редактирует, если текст не изменился
+    - если Телеграм просит RetryAfter — ждёт и повторяет 1 раз
+    """
+    key = (msg.chat.id, msg.message_id)
+    now = datetime.utcnow()
+
+    prev_text = _last_edit_text.get(key)
+    if prev_text == text:
+        return  # нечего менять
+
+    last = _last_edit_at.get(key)
+    if last and (now - last).total_seconds() < EDIT_MIN_INTERVAL_SEC:
+        return  # слишком часто
+
+    try:
+        await msg.edit_text(text, reply_markup=reply_markup)
+        _last_edit_at[key] = now
+        _last_edit_text[key] = text
+    except Exception as e:
+        # Flood control
+        if e.__class__.__name__ == "TelegramRetryAfter":
+            wait_s = getattr(e, "retry_after", 3)
+            await asyncio.sleep(wait_s)
+            try:
+                await msg.edit_text(text, reply_markup=reply_markup)
+                _last_edit_at[key] = datetime.utcnow()
+                _last_edit_text[key] = text
+            except Exception:
+                pass
+        else:
+            # например "message is not modified" и т.п.
+            pass
+
+# =======================
 # DUELS (GUNFIGHT)
 # =======================
 ACTION_ALIASES = {
@@ -594,64 +638,88 @@ def parse_action(text: str) -> str | None:
 def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
     a = data["players"][str(a_id)]
     b = data["players"][str(b_id)]
+
     a_name = get_user_display(chat_id, a_id)
     b_name = get_user_display(chat_id, b_id)
 
-    # --- helpers ---
-    def act_name(action: str | None) -> str:
+    def bar(cur: int, mx: int, filled="█", empty="░") -> str:
+        cur = max(0, min(mx, int(cur)))
+        return filled * cur + empty * (mx - cur)
+
+    def act_icon(action: str | None) -> str:
         return {
+            None: "—",
             "aim": "🎯 прицел",
             "reload": "🔄 перезарядка",
             "heal": "🩹 перевязка",
             "dodge": "🕺 уклон",
             "shoot": "🔫 выстрел",
-            None: "—",
         }.get(action, str(action))
 
-    def moved(uid: int) -> str:
+    def move_state(uid: int) -> str:
         return "✅ походил" if data["moves"].get(str(uid)) is not None else "⏳ ждёт"
 
-    def chosen(uid: int) -> str:
-        return act_name(data["moves"].get(str(uid)))
-
-    def p_line(name: str, p: dict, uid: int) -> str:
-        acc = int(p["acc"] * 100)
-        return (
-            f"{name}\n"
-            f"❤ {p['hp']}   🔫 {p['ammo']}   🎯 {acc}%   🩹 {'да' if p['heal_used'] else 'нет'}\n"
-            f"{moved(uid)} • выбор: {chosen(uid)}"
-        )
-
-    # --- таймер ---
-    timer = ""
+    # дедлайн (показываем понятно: осталось N сек)
+    left_s = None
     if data.get("deadline"):
         try:
             dl = datetime.fromisoformat(data["deadline"])
-            timer = f"⏱️ до {dl.strftime('%H:%M:%S')}"
+            now_dt = now_tz(get_settings(chat_id)["tz"])
+            left_s = int((dl - now_dt).total_seconds())
         except Exception:
-            pass
+            left_s = None
+    if left_s is None:
+        timer_line = ""
+    else:
+        if left_s < 0:
+            left_s = 0
+        timer_line = f"⏱ Осталось: {left_s}s (раунд {data.get('round_seconds', DUEL_ROUND_SECONDS_START)}s)\n"
 
-    # --- прошлый раунд ---
+    # прошлый раунд (если есть)
+    last_moves = data.get("last_moves") or {}
+    last_a = last_moves.get(str(a_id))
+    last_b = last_moves.get(str(b_id))
+    last_log = (data.get("last_round_log") or "").strip()
+
     last_block = ""
-    last = (data.get("last_round_log") or "").strip()
-    if last:
-        lines = last.splitlines()
-        short = "\n".join(lines[:3])
-        if len(lines) > 3:
-            short += "\n…"
-        last_block = f"🕯️ **Прошлый раунд**\n{short}\n\n"
+    if last_a or last_b or last_log:
+        last_block = (
+            "🧾 Прошлый раунд:\n"
+            f"• {a_name}: {act_icon(last_a)}\n"
+            f"• {b_name}: {act_icon(last_b)}\n"
+        )
+        if last_log:
+            # чтобы не раздувать экран — оставим максимум 3 строки
+            lines = last_log.splitlines()
+            if len(lines) > 3:
+                lines = lines[:3] + ["…"]
+            last_block += "— " + "\n— ".join(lines) + "\n\n"
 
-    # --- сборка ---
-    text = (
-        f"{last_block}"
-        f"⚔️ **ДУЭЛЬ** — Раунд {data['round']}\n"
-        f"{timer}\n\n"
-        f"{p_line(a_name, a, a_id)}\n\n"
-        f"{p_line(b_name, b, b_id)}\n\n"
-        f"⬇️ Жми действие кнопками ниже"
+    def player_block(name: str, p: dict, uid: int) -> str:
+        acc = int(p["acc"] * 100)
+        hp_bar = bar(p["hp"], DUEL_HP)
+        ammo_bar = "●" * p["ammo"] + "○" * (DUEL_AMMO_MAX - p["ammo"])
+        heal_flag = "🩹1" if not p.get("heal_used") else "🩹0"
+        return (
+            f"👤 {name}\n"
+            f"❤ {p['hp']}/{DUEL_HP}  {hp_bar}\n"
+            f"🔫 {ammo_bar}   🎯 {acc}%   {heal_flag}\n"
+            f"📌 {move_state(uid)}\n"
+        )
+
+    header = f"🤠 ДУЭЛЬ • Раунд {data['round']}\n"
+    body = (
+        header
+        + timer_line
+        + last_block
+        + player_block(a_name, a, a_id)
+        + "\n"
+        + player_block(b_name, b, b_id)
+        + "\n"
+        + "Жми кнопки ниже 👇"
     )
+    return body
 
-    return text
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
@@ -774,15 +842,21 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
             epic = "🥶 Оба промахнулись."
 
     # эпик иногда, не всегда
-    if epic and random.random() < DUEL_EPIC_PROB:
+    # эпик — ВСЕГДА если случился
+    if epic:
+        log.append("")
+        log.append("⚡ ЭПИЧЕСКИЙ МОМЕНТ")
         log.append(epic)
 
-    # сохранить историю прошлого раунда
+    # --- собираем лог раунда (нужен для истории и вывода) ---
+    body = "\n".join(log) if log else "Тишина."
+
+    # --- сохраняем историю прошлого раунда ---
+    if "last_moves" not in data:
+        data["last_moves"] = {}
     data["last_moves"][str(a_id)] = mA
     data["last_moves"][str(b_id)] = mB
 
-    # короткий лог прошлого раунда (без статуса)
-    body = "\n".join(log) if log else "Тишина."
     data["last_round_log"] = body
 
     # 4) победа / следующий раунд
@@ -1090,7 +1164,7 @@ async def main():
                 dl = datetime.fromisoformat(data["deadline"])
                 if now_dt > dl:
                     duel_set_state(chat_id, duel_id, "done")
-                    await q.message.edit_text("ДУЭЛЬ\n\nВремя вышло. Дуэль завершена.", reply_markup=None)
+                    await safe_edit_text("ДУЭЛЬ\n\nВремя вышло. Дуэль завершена.", reply_markup=None)
                     await q.answer("Время вышло", show_alert=True)
                     return
 
@@ -1103,7 +1177,7 @@ async def main():
                 loser_name = get_user_display(chat_id, user_id)
 
                 duel_set_state(chat_id, duel_id, "done")
-                await q.message.edit_text(
+                await safe_edit_text(
                     f"ДУЭЛЬ\n\n{loser_name} сдался. Победа {winner_name}. +{DUEL_REP_REWARD} репутации (итого {score}).",
                     reply_markup=None
                 )
