@@ -446,30 +446,36 @@ EDIT_MIN_INTERVAL_SEC = 1.2  # можно 1.0–2.0
 _last_edit_at = {}           # key: (chat_id, message_id) -> datetime
 _last_edit_text = {}         # key: (chat_id, message_id) -> str
 
-async def safe_edit_text(msg, text: str, reply_markup=None):
+async def safe_edit_text(msg, text, reply_markup=None, *, key=None, min_interval=1.2):
     """
-    Редактирует сообщение, но:
-    - не чаще чем раз в EDIT_MIN_INTERVAL_SEC
-    - не редактирует, если текст не изменился
-    - если Телеграм просит RetryAfter — ждёт и повторяет 1 раз
+    Анти-флуд для edit_text:
+    - не редактируем чаще чем раз в min_interval секунд
+    - не редактируем, если текст не изменился
+    - обрабатываем TelegramRetryAfter
     """
-    key = (msg.chat.id, msg.message_id)
+    if msg is None:
+        return
+
     now = datetime.utcnow()
 
-    prev_text = _last_edit_text.get(key)
-    if prev_text == text:
-        return  # нечего менять
+    # ключ по умолчанию: чат + сообщение
+    if key is None:
+        key = (msg.chat.id, msg.message_id)
 
-    last = _last_edit_at.get(key)
-    if last and (now - last).total_seconds() < EDIT_MIN_INTERVAL_SEC:
-        return  # слишком часто
+    # если текст не поменялся — не трогаем
+    if _last_edit_text.get(key) == text:
+        return
+
+    # анти-частые редактирования
+    last_at = _last_edit_at.get(key)
+    if last_at and (now - last_at).total_seconds() < min_interval:
+        return
 
     try:
         await msg.edit_text(text, reply_markup=reply_markup)
         _last_edit_at[key] = now
         _last_edit_text[key] = text
     except Exception as e:
-        # Flood control
         if e.__class__.__name__ == "TelegramRetryAfter":
             wait_s = getattr(e, "retry_after", 3)
             await asyncio.sleep(wait_s)
@@ -480,7 +486,35 @@ async def safe_edit_text(msg, text: str, reply_markup=None):
             except Exception:
                 pass
         else:
-            # например "message is not modified" и т.п.
+            # "message is not modified" и т.п.
+            pass
+
+async def safe_edit_by_ids(bot: Bot, chat_id: int, message_id: int, text: str, reply_markup=None, min_interval=1.2):
+    key = (chat_id, message_id)
+    now = datetime.utcnow()
+
+    if _last_edit_text.get(key) == text:
+        return
+
+    last_at = _last_edit_at.get(key)
+    if last_at and (now - last_at).total_seconds() < min_interval:
+        return
+
+    try:
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
+        _last_edit_at[key] = now
+        _last_edit_text[key] = text
+    except Exception as e:
+        if e.__class__.__name__ == "TelegramRetryAfter":
+            wait_s = getattr(e, "retry_after", 3)
+            await asyncio.sleep(wait_s)
+            try:
+                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
+                _last_edit_at[key] = datetime.utcnow()
+                _last_edit_text[key] = text
+            except Exception:
+                pass
+        else:
             pass
 
 # =======================
@@ -550,6 +584,7 @@ def duel_new_data(a_id: int, b_id: int) -> dict:
         },
         "moves": {str(a_id): None, str(b_id): None},
         "last_round_log": "",
+        "last_round_lines": [],
         "last_moves": {str(a_id): None, str(b_id): None},
         "bot_msgs": []  # сюда будем пушить message_id всех сообщений арены/результата
     }
@@ -638,88 +673,68 @@ def parse_action(text: str) -> str | None:
 def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
     a = data["players"][str(a_id)]
     b = data["players"][str(b_id)]
-
     a_name = get_user_display(chat_id, a_id)
     b_name = get_user_display(chat_id, b_id)
 
-    def bar(cur: int, mx: int, filled="█", empty="░") -> str:
-        cur = max(0, min(mx, int(cur)))
-        return filled * cur + empty * (mx - cur)
-
-    def act_icon(action: str | None) -> str:
-        return {
-            None: "—",
-            "aim": "🎯 прицел",
-            "reload": "🔄 перезарядка",
-            "heal": "🩹 перевязка",
-            "dodge": "🕺 уклон",
-            "shoot": "🔫 выстрел",
-        }.get(action, str(action))
-
-    def move_state(uid: int) -> str:
+    def moved(uid: int) -> str:
         return "✅ походил" if data["moves"].get(str(uid)) is not None else "⏳ ждёт"
 
-    # дедлайн (показываем понятно: осталось N сек)
-    left_s = None
+    def hp_bar(hp: int, max_hp: int) -> str:
+        hp = max(0, min(hp, max_hp))
+        return "█" * hp + "░" * (max_hp - hp)
+
+    def ammo_bar(ammo: int, max_ammo: int) -> str:
+        ammo = max(0, min(ammo, max_ammo))
+        return "●" * ammo + "○" * (max_ammo - ammo)
+
+    # Таймер
+    deadline_str = ""
     if data.get("deadline"):
         try:
             dl = datetime.fromisoformat(data["deadline"])
-            now_dt = now_tz(get_settings(chat_id)["tz"])
-            left_s = int((dl - now_dt).total_seconds())
+            remain_s = int((dl - datetime.now(dl.tzinfo)).total_seconds())
+            if remain_s < 0:
+                remain_s = 0
+            deadline_str = f"{remain_s}s"
         except Exception:
-            left_s = None
-    if left_s is None:
-        timer_line = ""
-    else:
-        if left_s < 0:
-            left_s = 0
-        timer_line = f"⏱ Осталось: {left_s}s (раунд {data.get('round_seconds', DUEL_ROUND_SECONDS_START)}s)\n"
+            deadline_str = ""
 
-    # прошлый раунд (если есть)
-    last_moves = data.get("last_moves") or {}
-    last_a = last_moves.get(str(a_id))
-    last_b = last_moves.get(str(b_id))
-    last_log = (data.get("last_round_log") or "").strip()
+    round_s = int(data.get("round_seconds", DUEL_ROUND_SECONDS_START))
 
-    last_block = ""
-    if last_a or last_b or last_log:
-        last_block = (
-            "🧾 Прошлый раунд:\n"
-            f"• {a_name}: {act_icon(last_a)}\n"
-            f"• {b_name}: {act_icon(last_b)}\n"
-        )
-        if last_log:
-            # чтобы не раздувать экран — оставим максимум 3 строки
-            lines = last_log.splitlines()
-            if len(lines) > 3:
-                lines = lines[:3] + ["…"]
-            last_block += "— " + "\n— ".join(lines) + "\n\n"
+    def p_block(name: str, p: dict, uid: int) -> str:
+        acc = int(float(p["acc"]) * 100)
+        hp = int(p["hp"])
+        ammo = int(p["ammo"])
+        heal_used = 1 if p.get("heal_used") else 0
 
-    def player_block(name: str, p: dict, uid: int) -> str:
-        acc = int(p["acc"] * 100)
-        hp_bar = bar(p["hp"], DUEL_HP)
-        ammo_bar = "●" * p["ammo"] + "○" * (DUEL_AMMO_MAX - p["ammo"])
-        heal_flag = "🩹1" if not p.get("heal_used") else "🩹0"
         return (
             f"👤 {name}\n"
-            f"❤ {p['hp']}/{DUEL_HP}  {hp_bar}\n"
-            f"🔫 {ammo_bar}   🎯 {acc}%   {heal_flag}\n"
-            f"📌 {move_state(uid)}\n"
+            f"❤️ {hp}/{DUEL_HP}  {hp_bar(hp, DUEL_HP)}\n"
+            f"🔫 {ammo_bar(ammo, DUEL_AMMO_MAX)}   🎯 {acc}%   🩹{heal_used}\n"
+            f"{moved(uid)}"
         )
 
-    header = f"🤠 ДУЭЛЬ • Раунд {data['round']}\n"
-    body = (
-        header
-        + timer_line
-        + last_block
-        + player_block(a_name, a, a_id)
-        + "\n"
-        + player_block(b_name, b, b_id)
-        + "\n"
-        + "Жми кнопки ниже 👇"
-    )
-    return body
+    # Прошлый раунд (коротко, как ты просил)
+    last_lines = []
+    for line in (data.get("last_round_lines") or []):
+        line = (line or "").strip()
+        if line:
+            last_lines.append("— " + line)
 
+    last_block = ""
+    if last_lines:
+        last_block = "\n\n🧾 Прошлый раунд:\n" + "\n".join(last_lines)
+
+    header = f"🤠 ДУЭЛЬ • Раунд {data.get('round', 1)}"
+    timer = f"⏱️ Осталось: {deadline_str} (раунд {round_s}s)" if deadline_str else f"⏱️ Раунд: {round_s}s"
+
+    return (
+        f"{header}\n"
+        f"{timer}\n\n"
+        f"{p_block(a_name, a, a_id)}\n\n"
+        f"{p_block(b_name, b, b_id)}"
+        f"{last_block}"
+    )
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
@@ -739,6 +754,10 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
     if mB is None:
         mB = "dodge"
 
+    # hp до действий этого раунда (нужно для красивого вывода перевязки 2→3❤️)
+    a_hp_before = pA["hp"]
+    b_hp_before = pB["hp"]
+
     log = []
 
     def apply_action(action: str, me: dict, actor_name: str):
@@ -749,7 +768,7 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
             log.append(f"{actor_name}: 🎯 прицел (+точность).")
         elif action == "reload":
             me["ammo"] = DUEL_AMMO_MAX
-            log.append(f"{actor_name}: 🔄 перезарядка (патроны = {DUEL_AMMO_MAX}).")
+            log.append(f"{actor_name}: 🔄 перезарядка")
         elif action == "heal":
             if me["heal_used"]:
                 log.append(f"{actor_name}: 🩹 перевязка не удалась (уже использовал).")
@@ -767,12 +786,12 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
 
         # осечка 
         if DUEL_FUMBLE_PROB > 0 and random.random() < DUEL_FUMBLE_PROB:
-            log.append(f"{shooter_name}: 🔫 осечка! Щёлк…")
+            log.append(f"{shooter_name}: 🔫 осечка!")
             shooter["aimed"] = False
             return {"shot": True, "hit": False, "crit": False, "chance": None, "roll": None, "target": target_name}
 
         if shooter["ammo"] <= 0:
-            log.append(f"{shooter_name}: 🔫 щёлк — патроны кончились.")
+            log.append(f"{shooter_name}: 🔫 патроны кончились.")
             shooter["aimed"] = False
             return {"shot": False, "hit": False, "crit": False, "chance": None, "roll": None, "target": target_name}
 
@@ -818,6 +837,26 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
     if mB == "shoot":
         sB = shoot(b_name, pB, a_name, pA, mA)
 
+    # hp после действий этого раунда (после apply + shoot!)
+    a_hp_after = pA["hp"]
+    b_hp_after = pB["hp"]
+
+    # короткая история прошлого раунда (2 строки)
+    lines = []
+    if mA == "heal":
+        lines.append(f"{a_name}: {act_name(mA)} ({a_hp_before}→{a_hp_after}❤️)")
+    else:
+        lines.append(f"{a_name}: {act_name(mA)}")
+
+    if mB == "heal":
+        lines.append(f"{b_name}: {act_name(mB)} ({b_hp_before}→{b_hp_after}❤️)")
+    else:
+        lines.append(f"{b_name}: {act_name(mB)}")
+
+    data["last_round_lines"] = lines
+    data["last_moves"][str(a_id)] = mA
+    data["last_moves"][str(b_id)] = mB
+
     # 3) эпик-строка (одна за раунд)
     epic = None
     if pA["hp"] == 1 and pB["hp"] == 1:
@@ -841,7 +880,6 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
         elif sA and sB and sA.get("shot") and sB.get("shot") and (not sA.get("hit")) and (not sB.get("hit")):
             epic = "🥶 Оба промахнулись."
 
-    # эпик иногда, не всегда
     # эпик — ВСЕГДА если случился
     if epic:
         log.append("")
@@ -963,11 +1001,14 @@ async def background_silence_watcher(bot: Bot):
                             duel_set_state(chat_id, duel_id, "done")
                             duel_update_data(chat_id, duel_id, data)
                             try:
-                                await bot.edit_message_text(
-                                    chat_id=chat_id,
-                                    message_id=arena_msg_id,
-                                    text="ДУЭЛЬ\n\n" + result_text
+                                await safe_edit_by_ids(
+                                    bot,
+                                    chat_id,
+                                    arena_msg_id,
+                                    "ДУЭЛЬ\n\n" + result_text,
+                                    reply_markup=None
                                 )
+
                             except Exception:
                                 pass
                         else:
@@ -976,10 +1017,11 @@ async def background_silence_watcher(bot: Bot):
                             duel_update_data(chat_id, duel_id, data)
                             try:
                                 arena_text = duel_status_text(chat_id, a_id, b_id, data)
-                                await bot.edit_message_text(
-                                    chat_id=chat_id,
-                                    message_id=arena_msg_id,
-                                    text="ДУЭЛЬ\n\n" + arena_text,
+                                await safe_edit_by_ids(
+                                    bot,
+                                    chat_id,
+                                    arena_msg_id,
+                                    "ДУЭЛЬ\n\n" + arena_text,
                                     reply_markup=kb_duel_actions(duel_id)
                                 )
                             except Exception:
@@ -1164,7 +1206,11 @@ async def main():
                 dl = datetime.fromisoformat(data["deadline"])
                 if now_dt > dl:
                     duel_set_state(chat_id, duel_id, "done")
-                    await safe_edit_text("ДУЭЛЬ\n\nВремя вышло. Дуэль завершена.", reply_markup=None)
+                    await safe_edit_text(
+                        q.message,
+                        "ДУЭЛЬ\n\nВремя вышло. Дуэль завершена.",
+                        reply_markup=None
+                    )
                     await q.answer("Время вышло", show_alert=True)
                     return
 
@@ -1178,6 +1224,7 @@ async def main():
 
                 duel_set_state(chat_id, duel_id, "done")
                 await safe_edit_text(
+                    q.message,
                     f"ДУЭЛЬ\n\n{loser_name} сдался. Победа {winner_name}. +{DUEL_REP_REWARD} репутации (итого {score}).",
                     reply_markup=None
                 )
@@ -1203,7 +1250,7 @@ async def main():
 
             # обновить арену, чтобы видно ✅/⏳
             arena_text = duel_status_text(chat_id, a_id, b_id, data)
-            await q.message.edit_text("ДУЭЛЬ\n\n" + arena_text, reply_markup=kb_duel_actions(duel_id))
+            await safe_edit_text(q.message, "ДУЭЛЬ\n\n" + arena_text, reply_markup=kb_duel_actions(duel_id))
 
             # если оба походили — резолв
             if data["moves"][str(a_id)] is not None and data["moves"][str(b_id)] is not None:
@@ -1212,7 +1259,8 @@ async def main():
 
                 if finished:
                     duel_set_state(chat_id, duel_id, "done")
-                    await q.message.edit_text("ДУЭЛЬ\n\n" + result_text, reply_markup=None)
+                    await safe_edit_text(q.message, "ДУЭЛЬ\n\n" + result_text, reply_markup=None)
+
                 else:
                     # уменьшаем время
                     data["round_seconds"] = max(DUEL_ROUND_SECONDS_MIN, int(data["round_seconds"]) - DUEL_ROUND_SECONDS_DEC)
@@ -1220,7 +1268,7 @@ async def main():
                     duel_update_data(chat_id, duel_id, data)
 
                     arena_text = duel_status_text(chat_id, a_id, b_id, data)
-                    await q.message.edit_text("ДУЭЛЬ\n\n" + arena_text, reply_markup=kb_duel_actions(duel_id))
+                    await safe_edit_text(q.message, "ДУЭЛЬ\n\n" + arena_text, reply_markup=kb_duel_actions(duel_id))
 
             await q.answer("Ок")
         except Exception as e:
