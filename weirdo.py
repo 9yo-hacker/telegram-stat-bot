@@ -1129,13 +1129,59 @@ def parse_duration_to_until(now: datetime, arg: str) -> datetime | None:
         return now + timedelta(days=n)
     return None
 
-def build_whereall_text(chat_id: int, tz: str, now: datetime) -> str:
-    since = now - timedelta(hours=24)
+def parse_period_arg(arg: str | None) -> tuple[str, timedelta]:
+    """
+    Возвращает (label, delta)
+    label: "24h" | "7d" | "30d"
+    """
+    a = (arg or "").strip().lower()
+
+    if a in ("", "day", "24h", "d"):
+        return ("24h", timedelta(hours=24))
+
+    if a in ("week", "7d", "w"):
+        return ("7d", timedelta(days=7))
+
+    if a in ("month", "30d", "m"):
+        return ("30d", timedelta(days=30))
+
+    # неизвестное — по умолчанию 24ч
+    return ("24h", timedelta(hours=24))
+
+def parse_period_arg(arg: str | None) -> tuple[str, timedelta]:
+    """
+    Периоды для статистики:
+    - default: 24 часа
+    - week: 7 дней
+    - month: 30 дней
+    """
+    a = (arg or "").strip().lower()
+
+    if a in ("", "day", "24h", "d"):
+        return ("24h", timedelta(hours=24))
+
+    if a in ("week", "7d", "w"):
+        return ("7d", timedelta(days=7))
+
+    if a in ("month", "30d", "m"):
+        return ("30d", timedelta(days=30))
+
+    # неизвестное — по умолчанию 24ч
+    return ("24h", timedelta(hours=24))
+
+def build_whereall_text(chat_id: int, tz: str, now: datetime, delta: timedelta, label: str) -> str:
+    since = now - delta
     rows = get_user_counts(chat_id, since)
     if not rows:
-        return "За последние 24 часа сообщений нет."
+        return f"За период {label} сообщений нет."
 
-    lines = [f"📊 Активность за 24ч (с {fmt_dt(since, tz)}):"]
+    title = {
+        "24h": "📊 Активность за 24ч",
+        "7d": "📊 Активность за 7 дней",
+        "30d": "📊 Активность за 30 дней",
+    }.get(label, "📊 Активность")
+
+    lines = [f"{title} (с {fmt_dt(since, tz)}):"]
     for uid, c in rows[:15]:
         name = get_user_display(chat_id, int(uid))
         lines.append(f"• {name}: {c}")
@@ -1166,6 +1212,20 @@ def build_interesting_text(chat_id: int, tz: str, now: datetime) -> str:
         parts.append("Топ-фраза: пусто")
 
     return "\n".join(parts)
+
+def build_word_of_period(chat_id: int, tz: str, now: datetime, delta: timedelta, title: str) -> str:
+    since = now - delta
+    topw = get_top_words(chat_id, since, limit=1)
+    if not topw:
+        return f"{title}: нет данных за период."
+
+    w, c = topw[0]
+    return (
+        f"{title}\n"
+        f"🗓️ Период: с {fmt_dt(since, tz)}\n"
+        f"🏆 Слово: **{w}**\n"
+        f"🔁 Встречалось: {c}"
+    )
 
 async def handle_autohype(msg: Message, chat_id: int, tz: str, now: datetime):
     since = now - timedelta(hours=24)
@@ -1422,11 +1482,12 @@ async def cmd_luck(msg: Message):
 # STATS
 # =======================
 @dp.message(Command("whereall"))
-async def cmd_whereall(msg: Message):
+async def cmd_whereall(msg: Message, command: CommandObject):
     chat_id = msg.chat.id
     s = get_settings(chat_id)
     if not s["enabled"]:
         return
+
     tz = s["tz"]
     now = now_tz(tz)
     if chat_is_quiet(s, now):
@@ -1436,16 +1497,24 @@ async def cmd_whereall(msg: Message):
         await msg.reply(f"⏳ КД {WHEREALL_COOLDOWN_MIN} минут.")
         return
 
-    set_field(chat_id, "last_where_all_at", now)
-    await msg.reply(build_whereall_text(chat_id, tz, now))
+    label, delta = parse_period_arg(command.args)
 
+    set_field(chat_id, "last_where_all_at", now)
+    await msg.reply(build_whereall_text(chat_id, tz, now, delta, label))
 
 @dp.message(Command("interesting"))
 async def cmd_interesting(msg: Message):
+    # алиас на /wordweek
+    await cmd_wordweek(msg)
+
+
+@dp.message(Command("wordweek"))
+async def cmd_wordweek(msg: Message):
     chat_id = msg.chat.id
     s = get_settings(chat_id)
     if not s["enabled"]:
         return
+
     tz = s["tz"]
     now = now_tz(tz)
     if chat_is_quiet(s, now):
@@ -1456,8 +1525,7 @@ async def cmd_interesting(msg: Message):
         return
 
     set_field(chat_id, "last_interesting_at", now)
-    await msg.reply(build_interesting_text(chat_id, tz, now))
-
+    await msg.reply(build_word_of_period(chat_id, tz, now, timedelta(days=7), "🧠 Слово недели"))
 
 # =======================
 # DUEL FLOW (invite / accept / decline / actions)
@@ -1746,6 +1814,48 @@ async def cb_duel_action(cb: CallbackQuery):
 # MESSAGE PIPELINE (logs + triggers)
 # =======================
 @dp.message()
+@dp.message()
+async def rep_by_reply(msg: Message):
+    if not msg.text:
+        return
+
+    text = msg.text.strip()
+    if text not in ("+", "++", "+++", "-", "--", "---"):
+        return
+
+    # обязательно ответ
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        return
+
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+
+    voter = msg.from_user
+    target = msg.reply_to_message.from_user
+
+    if not voter or voter.id == target.id:
+        return
+
+    delta = 1 if text.startswith("+") else -1
+    if delta < 0 and not ALLOW_NEGATIVE_REP:
+        return
+
+    tz = s["tz"]
+    now = now_tz(tz)
+
+    if not rep_can_vote(chat_id, voter.id, target.id, now):
+        return
+
+    rep_add(chat_id, target.id, delta)
+    rep_mark_vote(chat_id, voter.id, target.id, now)
+
+    score = rep_get(chat_id, target.id)
+    name = get_user_display(chat_id, target.id)
+
+    await msg.reply(f"{name}: {'+' if delta>0 else ''}{delta} репутации (итого {score})")
+
 async def any_message(msg: Message, bot: Bot):
     # логирование, триггеры, авто-приколы
     if not msg.chat:
