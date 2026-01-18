@@ -640,6 +640,7 @@ def duel_new_data(a_id: int, b_id: int) -> dict:
             str(a_id): {"hp": DUEL_HP, "ammo": DUEL_AMMO_MAX, "acc": DUEL_BASE_ACC, "heal_used": False, "aimed": False, "crit_bonus": 0.0},
             str(b_id): {"hp": DUEL_HP, "ammo": DUEL_AMMO_MAX, "acc": DUEL_BASE_ACC, "heal_used": False, "aimed": False, "crit_bonus": 0.0},
         },
+        "turn": str(a_id),
         "moves": {str(a_id): None, str(b_id): None},
         "last_round_lines": [],
     }
@@ -712,6 +713,7 @@ def duel_activate(chat_id: int, duel_id: str, arena_msg_id: int):
 def duel_start_round(data: dict, now_dt: datetime, a_id: int, b_id: int):
     data["moves"][str(a_id)] = None
     data["moves"][str(b_id)] = None
+    data["turn"] = str(a_id)
     data["deadline"] = (now_dt + timedelta(seconds=int(data.get("round_seconds", DUEL_ROUND_SECONDS)))).isoformat()
 
 def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
@@ -768,9 +770,13 @@ def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
 
     header = f"🤠 ДУЭЛЬ • Раунд {data.get('round', 1)}"
     timer = f"⏱️ Осталось: {deadline_str} (раунд {round_s}s)" if deadline_str else f"⏱️ Раунд: {round_s}s"
-
+    
+    turn_id = safe_int(data.get("turn"), 0)
+    turn_name = get_user_display(chat_id, turn_id) if turn_id else "?"
+    
     return (
         f"{header}\n"
+        f"▶️ Ходит: {turn_name}\n"
         f"{timer}\n\n"
         f"{p_block(a_name, a, a_id)}\n\n"
         f"{p_block(b_name, b, b_id)}"
@@ -1733,6 +1739,10 @@ async def cb_duel_action(cb: CallbackQuery):
         log_error("cb_duel_action json.loads", e)
         await cb.answer("Ошибка данных дуэли.", show_alert=True)
         return
+    
+    if str(uid) != data.get("turn"):
+        await cb.answer("Сейчас ход другого игрока.", show_alert=True)
+        return
 
     # дедлайн текущего раунда
     if data.get("deadline"):
@@ -1756,7 +1766,7 @@ async def cb_duel_action(cb: CallbackQuery):
         try:
             await cb.message.edit_text(
                 f"🤠 ДУЭЛЬ • ЗАВЕРШЕНО\n\n"
-                f"{me_name} сдаётся.\n"
+                f"{me_name} позорно покидает арену.\n"
                 f"Победа {other_name}. +{DUEL_REP_REWARD} репутации (итого {score})."
             )
         except Exception:
@@ -1776,6 +1786,11 @@ async def cb_duel_action(cb: CallbackQuery):
         return
 
     data["moves"][str(uid)] = action_norm
+
+    # --- переключаем ход на другого игрока ---
+    other = b_id if uid == a_id else a_id
+    data["turn"] = str(other)
+
     duel_update_data(chat_id, duel_id, data)
 
     # если второй уже походил — резолвим раунд
