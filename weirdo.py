@@ -782,6 +782,7 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
     data["last_moves"][str(b_id)] = mB
 
     # короткий лог прошлого раунда (без статуса)
+    body = "\n".join(log) if log else "Тишина."
     data["last_round_log"] = body
 
     # 4) победа / следующий раунд
@@ -806,7 +807,6 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
         data["moves"][str(a_id)] = None
         data["moves"][str(b_id)] = None
 
-    body = "\n".join(log) if log else "Тишина."
     if finished:
         return f"{body}\n\n{result}", True
 
