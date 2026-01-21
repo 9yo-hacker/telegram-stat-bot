@@ -291,6 +291,76 @@ def init_db():
         PRIMARY KEY(chat_id, user_id)
     )""")
 
+        # =======================
+    # TOKENS ECONOMY
+    # =======================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS wallet (
+        chat_id INTEGER,
+        user_id INTEGER,
+        balance INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(chat_id, user_id)
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS token_tx (
+        chat_id INTEGER,
+        ts TEXT NOT NULL,
+        from_user_id INTEGER,
+        to_user_id INTEGER,
+        amount INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        meta TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_token_tx_chat_ts ON token_tx(chat_id, ts)")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS slot_cooldown (
+        chat_id INTEGER,
+        user_id INTEGER,
+        ts TEXT NOT NULL,
+        PRIMARY KEY(chat_id, user_id)
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS jackpot_pool (
+        chat_id INTEGER PRIMARY KEY,
+        amount INTEGER NOT NULL DEFAULT 0
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS treasury (
+        chat_id INTEGER PRIMARY KEY,
+        amount INTEGER NOT NULL DEFAULT 0
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS daily_claim (
+        chat_id INTEGER,
+        user_id INTEGER,
+        day TEXT NOT NULL,
+        PRIMARY KEY(chat_id, user_id, day)
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS daily_streak (
+        chat_id INTEGER,
+        user_id INTEGER,
+        last_claim_at TEXT,
+        streak INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(chat_id, user_id)
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS duel_bets (
+        duel_id TEXT PRIMARY KEY,
+        chat_id INTEGER NOT NULL,
+        bet INTEGER NOT NULL DEFAULT 0,
+        a_paid INTEGER NOT NULL DEFAULT 0,
+        b_paid INTEGER NOT NULL DEFAULT 0
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_duel_bets_chat ON duel_bets(chat_id)")
+
     con.commit()
     con.close()
 
@@ -464,6 +534,216 @@ def rep_mark_vote(chat_id: int, from_id: int, to_id: int, now: datetime):
     ON CONFLICT(chat_id, from_user_id, to_user_id) DO UPDATE SET ts=excluded.ts
     """, (chat_id, from_id, to_id, now.isoformat()))
 
+# =======================
+# TOKENS WALLET
+# =======================
+MAX_BET = 200
+SLOT_COOLDOWN_MIN = 30
+PAY_FEE_PCT = 3  # комиссия на переводы, %
+
+def wallet_get(chat_id: int, user_id: int) -> int:
+    row = db_one("SELECT balance FROM wallet WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    return int(row[0]) if row else 0
+
+def wallet_add(chat_id: int, user_id: int, delta: int):
+    db_exec("""
+    INSERT INTO wallet(chat_id, user_id, balance) VALUES(?, ?, ?)
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET balance = balance + ?
+    """, (chat_id, user_id, delta, delta))
+
+def wallet_set(chat_id: int, user_id: int, value: int):
+    value = max(0, int(value))
+    db_exec("""
+    INSERT INTO wallet(chat_id, user_id, balance) VALUES(?, ?, ?)
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET balance = excluded.balance
+    """, (chat_id, user_id, value))
+
+def tx_log(chat_id: int, ts: datetime, from_uid: int | None, to_uid: int | None, amount: int, kind: str, meta: str | None = None):
+    db_exec(
+        "INSERT INTO token_tx(chat_id, ts, from_user_id, to_user_id, amount, kind, meta) VALUES(?, ?, ?, ?, ?, ?, ?)",
+        (chat_id, ts.isoformat(), from_uid, to_uid, int(amount), kind, meta),
+    )
+
+def pool_get(chat_id: int, table: str) -> int:
+    row = db_one(f"SELECT amount FROM {table} WHERE chat_id=?", (chat_id,))
+    return int(row[0]) if row else 0
+
+def pool_add(chat_id: int, table: str, delta: int):
+    db_exec(f"""
+    INSERT INTO {table}(chat_id, amount) VALUES(?, ?)
+    ON CONFLICT(chat_id) DO UPDATE SET amount = amount + ?
+    """, (chat_id, int(delta), int(delta)))
+
+def pool_set(chat_id: int, table: str, value: int):
+    value = max(0, int(value))
+    db_exec(f"""
+    INSERT INTO {table}(chat_id, amount) VALUES(?, ?)
+    ON CONFLICT(chat_id) DO UPDATE SET amount = excluded.amount
+    """, (chat_id, value))
+
+def slot_can_spin(chat_id: int, user_id: int, now: datetime) -> bool:
+    row = db_one("SELECT ts FROM slot_cooldown WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    if not row:
+        return True
+    last = datetime.fromisoformat(row[0])
+    return (now - last) >= timedelta(minutes=SLOT_COOLDOWN_MIN)
+
+def slot_mark_spin(chat_id: int, user_id: int, now: datetime):
+    db_exec("""
+    INSERT INTO slot_cooldown(chat_id, user_id, ts)
+    VALUES(?, ?, ?)
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET ts=excluded.ts
+    """, (chat_id, user_id, now.isoformat()))
+
+def daily_claimed(chat_id: int, user_id: int, day: str) -> bool:
+    row = db_one(
+        "SELECT 1 FROM daily_claim WHERE chat_id=? AND user_id=? AND day=?",
+        (chat_id, user_id, day),
+    )
+    return bool(row)
+
+def daily_mark_claim(chat_id: int, user_id: int, day: str):
+    db_exec(
+        "INSERT OR IGNORE INTO daily_claim(chat_id, user_id, day) VALUES(?, ?, ?)",
+        (chat_id, user_id, day),
+    )
+
+def daily_streak_get(chat_id: int, user_id: int):
+    return db_one(
+        "SELECT last_claim_at, streak FROM daily_streak WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    )
+
+def daily_streak_set(chat_id: int, user_id: int, last_claim_at: datetime, streak: int):
+    db_exec("""
+    INSERT INTO daily_streak(chat_id, user_id, last_claim_at, streak)
+    VALUES(?, ?, ?, ?)
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET
+      last_claim_at=excluded.last_claim_at,
+      streak=excluded.streak
+    """, (chat_id, user_id, last_claim_at.isoformat(), int(streak)))
+
+def duel_bet_create(chat_id: int, duel_id: str, bet: int):
+    db_exec(
+        "INSERT INTO duel_bets(duel_id, chat_id, bet, a_paid, b_paid) VALUES(?, ?, ?, 0, 0)",
+        (duel_id, chat_id, int(bet)),
+    )
+
+def duel_bet_get(duel_id: str):
+    return db_one("SELECT chat_id, bet, a_paid, b_paid FROM duel_bets WHERE duel_id=?", (duel_id,))
+
+def duel_bet_set_paid(duel_id: str, a_paid: int | None = None, b_paid: int | None = None):
+    row = duel_bet_get(duel_id)
+    if not row:
+        return
+    chat_id, bet, ap, bp = row
+    ap = ap if a_paid is None else int(a_paid)
+    bp = bp if b_paid is None else int(b_paid)
+    db_exec("UPDATE duel_bets SET a_paid=?, b_paid=? WHERE duel_id=?", (ap, bp, duel_id))
+
+def duel_bet_delete(duel_id: str):
+    db_exec("DELETE FROM duel_bets WHERE duel_id=?", (duel_id,))
+
+def duel_bet_payout(chat_id: int, duel_id: str, winner_id: int, now: datetime):
+    row = duel_bet_get(duel_id)
+    if not row:
+        return 0
+    _chat, bet, a_paid, b_paid = row
+    bet = int(bet)
+    if bet <= 0:
+        duel_bet_delete(duel_id)
+        return 0
+
+    bank = bet * 2
+    wallet_add(chat_id, winner_id, bank)
+    tx_log(chat_id, now, None, winner_id, bank, "duel_bet_payout", meta=f"duel_id={duel_id},bet={bet}")
+    duel_bet_delete(duel_id)
+    return bank
+
+# =======================
+# SLOTS (TOKENS) — режимы риска + джекпот
+# =======================
+# доли ставки
+JACKPOT_PCT = 8   # % в джекпот
+TREASURY_PCT = 2  # % в казну
+
+# таблицы выплат: (multiplier, weight)
+SLOT_TABLES = {
+    "low":  [(0.0, 55), (0.5, 20), (1.0, 15), (1.5, 7), (2.0, 3)],
+    "mid":  [(0.0, 60), (0.5, 10), (1.0, 14), (2.0, 10), (3.0, 5), (5.0, 1)],
+    "high": [(0.0, 72), (0.5, 6),  (1.0, 8),  (2.0, 7),  (4.0, 5), (8.0, 2)],
+}
+
+JACKPOT_CHANCE = {  # шанс “сорвать банк”
+    "low":  0.002,
+    "mid":  0.003,
+    "high": 0.005,
+}
+
+def weighted_choice(pairs):
+    total = sum(w for _, w in pairs)
+    r = random.randint(1, total)
+    s = 0
+    for val, w in pairs:
+        s += w
+        if r <= s:
+            return val
+    return pairs[-1][0]
+
+def parse_slot_args(args: str | None) -> tuple[str, int] | None:
+    """
+    /slot 50
+    /slot 50 high
+    /slot high 50
+    """
+    if not args:
+        return None
+    parts = [p for p in (args or "").split() if p.strip()]
+    if not parts:
+        return None
+
+    mode = "mid"
+    bet = None
+
+    for p in parts:
+        pl = p.lower()
+        if pl in ("low", "mid", "high"):
+            mode = pl
+        elif p.isdigit():
+            bet = int(p)
+
+    if bet is None:
+        return None
+
+    bet = max(1, min(MAX_BET, bet))
+    return mode, bet
+
+def slot_spin(mode: str) -> tuple[str, float, bool]:
+    """
+    returns: (emoji_line, multiplier, jackpot_hit)
+    """
+    mode = mode if mode in SLOT_TABLES else "mid"
+
+    # шанс сорвать джекпот
+    if random.random() < JACKPOT_CHANCE[mode]:
+        return "👑 | 👑 | 👑", 0.0, True
+
+    mult = float(weighted_choice(SLOT_TABLES[mode]))
+    # просто визуал, не влияет на математику
+    if mult >= 8:
+        line = "💎 | 💎 | 💎"
+    elif mult >= 4:
+        line = "🔥 | 🔥 | 🔥"
+    elif mult >= 2:
+        line = "🍀 | 🍀 | 🍀"
+    elif mult >= 1:
+        line = "🍋 | 🍋 | 🍋"
+    elif mult > 0:
+        line = "🍒 | 🍒 | 🍒"
+    else:
+        line = "💀 | 💀 | 💀"
+
+    return line, mult, False
 
 # =======================
 # SAFE EDIT (ANTI FLOOD)
@@ -711,6 +991,7 @@ def duel_activate(chat_id: int, duel_id: str, arena_msg_id: int):
     db_exec("UPDATE duels SET state='active', arena_msg_id=? WHERE chat_id=? AND duel_id=?", (arena_msg_id, chat_id, duel_id))
 
 def duel_start_round(data: dict, now_dt: datetime, a_id: int, b_id: int):
+    data["last_epic"] = None
     data["moves"][str(a_id)] = None
     data["moves"][str(b_id)] = None
     data["turn"] = str(a_id)
@@ -751,10 +1032,35 @@ def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
         hp = int(p["hp"])
         ammo = int(p["ammo"])
         heal_left = 0 if p.get("heal_used") else 1
+
+        # базовые лимиты
+        base_hp_max = DUEL_HP
+        base_ammo_max = DUEL_AMMO_MAX
+
+        # сколько сверху базы (от баффов)
+        extra_hp = max(0, hp - base_hp_max)
+        extra_ammo = max(0, ammo - base_ammo_max)
+
+        def hp_bar(hp_val: int, max_hp: int) -> str:
+            hp_val = max(0, min(hp_val, max_hp))
+            return "█" * hp_val + "░" * (max_hp - hp_val)
+
+        def ammo_bar(ammo_val: int, max_ammo: int) -> str:
+            ammo_val = max(0, min(ammo_val, max_ammo))
+            return "●" * ammo_val + "○" * (max_ammo - ammo_val)
+
+        hp_line = f"❤️ {hp}/{base_hp_max}  {hp_bar(hp, base_hp_max)}"
+        if extra_hp > 0:
+            hp_line += f" (+{extra_hp})"
+
+        ammo_line = f"🔫 {ammo_bar(ammo, base_ammo_max)}"
+        if extra_ammo > 0:
+            ammo_line += f" (+{extra_ammo})"
+
         return (
             f"👤 {name}\n"
-            f"❤️ {hp}/{DUEL_HP}  {hp_bar(hp, DUEL_HP)}\n"
-            f"🔫 {ammo_bar(ammo, DUEL_AMMO_MAX)}   🎯 {acc}%   🩹{heal_left}\n"
+            f"{hp_line}\n"
+            f"{ammo_line}   🎯 {acc}%   🩹{heal_left}\n"
             f"{moved(uid)}"
         )
 
@@ -767,6 +1073,10 @@ def duel_status_text(chat_id: int, a_id: int, b_id: int, data: dict) -> str:
     last_block = ""
     if last_lines:
         last_block = "\n\n🧾 Прошлый раунд:\n" + "\n".join(last_lines)
+
+    epic = (data.get("last_epic") or "").strip()
+    if epic:
+        last_block += "\n\n⚡ Эпик момент:\n" + epic
 
     header = f"🤠 ДУЭЛЬ • Раунд {data.get('round', 1)}"
     timer = f"⏱️ Осталось: {deadline_str} (раунд {round_s}s)" if deadline_str else f"⏱️ Раунд: {round_s}s"
@@ -907,7 +1217,12 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
     if epic:
         log.append(epic)
 
+    # сохраним эпик отдельно, чтобы показать в статусе
+    data["last_epic"] = epic  # будет None если не было
+
     body = "\n".join([x for x in log if x.strip()]) if log else "Тишина."
+    # сохраним лог раунда (чтобы показать в статусе)
+    data["last_round_log"] = [x for x in log if (x or "").strip()][-2:]  # последние 2 строк
 
     finished = False
     result = ""
@@ -1036,6 +1351,21 @@ async def background_duel_watcher(bot: Bot):
 
                         if finished:
                             duel_set_state(chat_id, duel_id, "done")
+                            
+                            # определяем победителя по hp
+                            a_hp = int(data["players"][str(a_id)]["hp"])
+                            b_hp = int(data["players"][str(b_id)]["hp"])
+                            winner = None
+                            if a_hp > 0 and b_hp <= 0:
+                                winner = a_id
+                            elif b_hp > 0 and a_hp <= 0:
+                                winner = b_id
+
+                            if winner:
+                                bank = duel_bet_payout(chat_id, duel_id, winner, now)
+                                if bank > 0:
+                                    body += f"\n\n💰 Банк: +{bank} tokens победителю."
+
                             duel_update_data(chat_id, duel_id, data)
                             try:
                                 await bot.edit_message_text(
@@ -1113,6 +1443,10 @@ async def reply_help(msg: Message):
         "• /duel @user — вызвать на дуэль\n"
         "• /whereall — кто сколько писал за 24ч\n"
         "• /interesting — топ-слова/фразы за 24ч\n"
+        "• /balance — tokens баланс + jackpot\n"
+        "• /pay @user 50 — перевод tokens (комиссия)\n"
+        "• /slot 50 [low|mid|high] — слоты на tokens (кд 30м, макс 200)\n"
+        "• /daily — ежедневный дроп tokens\n"
     )
     await msg.reply(text)
 
@@ -1134,25 +1468,6 @@ def parse_duration_to_until(now: datetime, arg: str) -> datetime | None:
     if unit == "d":
         return now + timedelta(days=n)
     return None
-
-def parse_period_arg(arg: str | None) -> tuple[str, timedelta]:
-    """
-    Возвращает (label, delta)
-    label: "24h" | "7d" | "30d"
-    """
-    a = (arg or "").strip().lower()
-
-    if a in ("", "day", "24h", "d"):
-        return ("24h", timedelta(hours=24))
-
-    if a in ("week", "7d", "w"):
-        return ("7d", timedelta(days=7))
-
-    if a in ("month", "30d", "m"):
-        return ("30d", timedelta(days=30))
-
-    # неизвестное — по умолчанию 24ч
-    return ("24h", timedelta(hours=24))
 
 def parse_period_arg(arg: str | None) -> tuple[str, timedelta]:
     """
@@ -1483,6 +1798,223 @@ async def cmd_luck(msg: Message):
 
     await msg.reply("\n".join(text))
 
+@dp.message(Command("balance"))
+async def cmd_balance(msg: Message):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    tz = s["tz"]
+    now = now_tz(tz)
+
+    update_user_cache_from_message(chat_id, msg, now)
+    uid = msg.from_user.id
+    bal = wallet_get(chat_id, uid)
+    jp = pool_get(chat_id, "jackpot_pool")
+    await msg.reply(f"💰 Tokens: {bal}\n👑 Jackpot: {jp}")
+
+@dp.message(Command("pay"))
+async def cmd_pay(msg: Message, command: CommandObject):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    tz = s["tz"]
+    now = now_tz(tz)
+
+    update_user_cache_from_message(chat_id, msg, now)
+
+    args = (command.args or "").strip()
+    if not args:
+        await msg.reply("Пример: /pay @user 50 (или reply) 50")
+        return
+
+    parts = args.split()
+    amount = None
+
+    # вариант: /pay 50 (reply)
+    if len(parts) == 1 and parts[0].isdigit():
+        amount = int(parts[0])
+        target = resolve_target_user_id(chat_id, msg, None)
+    else:
+        # /pay @user 50
+        target = resolve_target_user_id(chat_id, msg, parts[0])
+        if len(parts) >= 2 and parts[1].isdigit():
+            amount = int(parts[1])
+
+    if not target or amount is None:
+        await msg.reply("Формат: /pay @user 50  (или reply) /pay 50")
+        return
+
+    if target == msg.from_user.id:
+        await msg.reply("Себе нельзя.")
+        return
+
+    amount = max(1, amount)
+    fee = max(1, (amount * PAY_FEE_PCT) // 100)
+    total = amount + fee
+
+    bal = wallet_get(chat_id, msg.from_user.id)
+    if bal < total:
+        await msg.reply(f"Не хватает tokens. Нужно {total} (включая комиссию {fee}). У тебя {bal}.")
+        return
+
+    wallet_add(chat_id, msg.from_user.id, -total)
+    wallet_add(chat_id, target, +amount)
+    pool_add(chat_id, "treasury", +fee)
+
+    tx_log(chat_id, now, msg.from_user.id, target, amount, "pay", meta=f"fee={fee}")
+
+    to_name = get_user_display(chat_id, target)
+    await msg.reply(f"✅ Перевод: {to_name} +{amount} tokens\nКомиссия: {fee} → казна")
+
+@dp.message(Command("slot"))
+async def cmd_slot(msg: Message, command: CommandObject):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    tz = s["tz"]
+    now = now_tz(tz)
+    if chat_is_quiet(s, now):
+        return
+
+    update_user_cache_from_message(chat_id, msg, now)
+    uid = msg.from_user.id
+
+    parsed = parse_slot_args(command.args)
+    if not parsed:
+        await msg.reply("Пример: /slot 50  |  /slot 50 high  |  /slot low 20\nМакс ставка 200.")
+        return
+
+    mode, bet = parsed
+
+    if not slot_can_spin(chat_id, uid, now):
+        row = db_one("SELECT ts FROM slot_cooldown WHERE chat_id=? AND user_id=?", (chat_id, uid))
+        last = datetime.fromisoformat(row[0]) if row else now
+        left = (last + timedelta(minutes=SLOT_COOLDOWN_MIN)) - now
+        mins = max(0, int(left.total_seconds() // 60))
+        secs = max(0, int(left.total_seconds() % 60))
+        await msg.reply(f"⏳ Слот на кд. Осталось ~{mins}m {secs}s.")
+        return
+
+    bal = wallet_get(chat_id, uid)
+    if bal < bet:
+        await msg.reply(f"Не хватает tokens. Ставка {bet}, у тебя {bal}.")
+        return
+
+    # списали ставку
+    wallet_add(chat_id, uid, -bet)
+
+    # распределили проценты
+    jp_add = (bet * JACKPOT_PCT) // 100
+    tr_add = (bet * TREASURY_PCT) // 100
+    pool_add(chat_id, "jackpot_pool", +jp_add)
+    pool_add(chat_id, "treasury", +tr_add)
+
+    # крутим
+    line, mult, jackpot_hit = slot_spin(mode)
+
+    win = 0
+    extra = []
+
+    if jackpot_hit:
+        jp = pool_get(chat_id, "jackpot_pool")
+        win = jp
+        pool_set(chat_id, "jackpot_pool", 0)
+        extra.append(f"👑 ДЖЕКПОТ: +{jp} tokens")
+    else:
+        win = int(round(bet * mult))
+
+    if win > 0:
+        wallet_add(chat_id, uid, +win)
+
+    slot_mark_spin(chat_id, uid, now)
+    tx_log(chat_id, now, uid, None, bet, "slot_bet", meta=f"mode={mode}")
+    if win > 0:
+        tx_log(chat_id, now, None, uid, win, "slot_win", meta=f"mode={mode},mult={mult}")
+
+    new_bal = wallet_get(chat_id, uid)
+    jp_now = pool_get(chat_id, "jackpot_pool")
+
+    res = [
+        f"🎰 {line}",
+        f"Режим: {mode} • Ставка: {bet}",
+    ]
+
+    if jackpot_hit:
+        res.append("Сорвал банк.")
+    else:
+        if win <= 0:
+            res.append("💀 Мимо.")
+        else:
+            res.append(f"✅ Выигрыш: +{win} tokens (x{mult:g})")
+
+    if extra:
+        res.extend(extra)
+
+    res.append(f"💰 Баланс: {new_bal}")
+    res.append(f"👑 Jackpot: {jp_now}")
+
+    await msg.reply("\n".join(res))
+
+@dp.message(Command("daily"))
+async def cmd_daily(msg: Message):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    tz = s["tz"]
+    now = now_tz(tz)
+
+    update_user_cache_from_message(chat_id, msg, now)
+    uid = msg.from_user.id
+
+    day = date_key(now)
+    if daily_claimed(chat_id, uid, day):
+        await msg.reply("⏳ Ты уже забирал daily сегодня.")
+        return
+
+    # --- streak ---
+    row = daily_streak_get(chat_id, uid)
+    last = datetime.fromisoformat(row[0]) if row and row[0] else None
+    streak = int(row[1]) if row else 0
+
+    yesterday = (now - timedelta(days=1)).date().isoformat()
+    if last and last.date().isoformat() == yesterday:
+        streak += 1
+    else:
+        streak = 1
+
+    # базовый дроп
+    base = random.randint(10, 25)
+
+    # бонус за активность за 24ч: +0..+10
+    since = now - timedelta(hours=24)
+    row2 = db_one(
+        "SELECT COUNT(*) FROM msg_log WHERE chat_id=? AND user_id=? AND ts>=?",
+        (chat_id, uid, since.isoformat()),
+    )
+    c = int(row2[0]) if row2 else 0
+    bonus = min(10, c // 5)
+
+    # бонус за стрик
+    streak_bonus = min(20, (streak - 1) * 2)
+
+    amount = base + bonus + streak_bonus
+
+    wallet_add(chat_id, uid, amount)
+    daily_mark_claim(chat_id, uid, day)
+    daily_streak_set(chat_id, uid, now, streak)
+    tx_log(chat_id, now, None, uid, amount, "daily", meta=f"base={base},bonus={bonus},streak={streak},msg24h={c}")
+
+    bal = wallet_get(chat_id, uid)
+
+    await msg.reply(
+        f"🎁 Daily: +{amount} tokens (база {base} + активность {bonus} + стрик {streak_bonus})\n"
+        f"🔥 Стрик: {streak}\n"
+        f"💰 Баланс: {bal}"
+    )
 
 # =======================
 # STATS
@@ -1557,8 +2089,21 @@ async def cmd_duel(msg: Message, command: CommandObject):
     update_user_cache_from_message(chat_id, msg, now)
     a_id = msg.from_user.id
 
-    arg = (command.args or "").strip()
-    b_id = resolve_target_user_id(chat_id, msg, arg)
+    raw = (command.args or "").strip()
+    parts = raw.split()
+
+    bet = 0
+    target_arg = None
+
+    # /duel @user 50  или /duel 50 @user (разрешим оба)
+    for p in parts:
+        if p.isdigit():
+            bet = int(p)
+        else:
+            target_arg = p
+
+    b_id = resolve_target_user_id(chat_id, msg, target_arg)
+
 
     if not b_id:
         await msg.reply("Кого дуэлить? Пример: /duel @user (или reply на сообщение)")
@@ -1567,13 +2112,32 @@ async def cmd_duel(msg: Message, command: CommandObject):
         await msg.reply("Сам с собой — нет 😄")
         return
 
+    if bet < 0:
+        bet = 0
+    if bet > MAX_BET:
+        await msg.reply(f"Макс ставка: {MAX_BET} tokens.")
+        return
+
     # цель уже имеет pending?
     pending = duel_get_pending_for_b(chat_id, b_id)
     if pending:
         await msg.reply("У этого игрока уже висит приглашение. Пусть примет/откажет.")
         return
 
+    if bet > 0:
+        bal = wallet_get(chat_id, a_id)
+        if bal < bet:
+            await msg.reply(f"Не хватает tokens на ставку {bet}. У тебя {bal}.")
+            return
+        wallet_add(chat_id, a_id, -bet)
+
     duel_id = duel_create(chat_id, a_id, b_id, now)
+
+    duel_bet_create(chat_id, duel_id, bet)
+    if bet > 0:
+        duel_bet_set_paid(duel_id, a_paid=1)
+        tx_log(chat_id, now, a_id, None, bet, "duel_bet_lock", meta=f"duel_id={duel_id}")
+
     a_name = get_user_display(chat_id, a_id)
     b_name = get_user_display(chat_id, b_id)
     accept_deadline = now + timedelta(minutes=DUEL_ACCEPT_MIN)
@@ -1584,6 +2148,9 @@ async def cmd_duel(msg: Message, command: CommandObject):
         f"⏳ Принять до: {fmt_dt(accept_deadline, tz)}\n"
         f"Правила: 1 минута на раунд, HP={DUEL_HP}, патроны={DUEL_AMMO_MAX}.\n"
     )
+    if bet > 0:
+        text += f"\n💰 Ставка: {bet} tokens (банк {bet*2})"
+
     await msg.reply(text, reply_markup=kb_duel_invite(duel_id))
 
 @dp.callback_query(F.data.startswith("duel:accept:"))
@@ -1623,6 +2190,18 @@ async def cb_duel_accept(cb: CallbackQuery):
         duel_set_state(chat_id, duel_id, "done")
         await cb.answer("Поздно. Приглашение истекло.", show_alert=True)
         return
+
+    bet_row = duel_bet_get(duel_id)
+    bet = int(bet_row[1]) if bet_row else 0
+
+    if bet > 0:
+        bal = wallet_get(chat_id, b_id)
+        if bal < bet:
+            await cb.answer("Не хватает tokens на ставку.", show_alert=True)
+            return
+        wallet_add(chat_id, b_id, -bet)
+        duel_bet_set_paid(duel_id, b_paid=1)
+        tx_log(chat_id, now, b_id, None, bet, "duel_bet_lock", meta=f"duel_id={duel_id}")
 
     # активируем дуэль и создаём арену (новое сообщение)
     try:
@@ -1683,6 +2262,17 @@ async def cb_duel_decline(cb: CallbackQuery):
     if cb.from_user.id != b_id:
         await cb.answer("Отказаться может только вызванный игрок.", show_alert=True)
         return
+
+    bet_row = duel_bet_get(duel_id)
+    if bet_row:
+        _chat, bet, a_paid, b_paid = bet_row
+        bet = int(bet)
+        if bet > 0 and int(a_paid) == 1:
+            wallet_add(chat_id, a_id, +bet)
+            tz = get_settings(chat_id)["tz"]
+            now = now_tz(tz)
+            tx_log(chat_id, now, None, a_id, bet, "duel_bet_refund", meta=f"duel_id={duel_id}")
+        duel_bet_delete(duel_id)
 
     duel_set_state(chat_id, duel_id, "done")
     await cb.answer("Отказ.")
@@ -1756,23 +2346,30 @@ async def cb_duel_action(cb: CallbackQuery):
 
     # сдача
     if action == "surrender":
-        # второй победил
         other = b_id if uid == a_id else a_id
-        rep_add(chat_id, other, DUEL_REP_REWARD)
-        score = rep_get(chat_id, other)
         other_name = get_user_display(chat_id, other)
         me_name = get_user_display(chat_id, uid)
+
+        bank = duel_bet_payout(chat_id, duel_id, other, now)
+        rep_add(chat_id, other, DUEL_REP_REWARD)
+        score = rep_get(chat_id, other)
+
         duel_set_state(chat_id, duel_id, "done")
         try:
-            await cb.message.edit_text(
+            text = (
                 f"🤠 ДУЭЛЬ • ЗАВЕРШЕНО\n\n"
                 f"{me_name} позорно покидает арену.\n"
                 f"Победа {other_name}. +{DUEL_REP_REWARD} репутации (итого {score})."
             )
+            if bank > 0:
+                text += f"\n\n💰 Банк: +{bank} tokens победителю."
+            await cb.message.edit_text(text)
         except Exception:
             pass
+
         await cb.answer("Ты сдался.")
         return
+
 
     # если уже ходил
     if data["moves"].get(str(uid)) is not None:
@@ -1798,6 +2395,21 @@ async def cb_duel_action(cb: CallbackQuery):
         body, finished = duel_resolve_round(chat_id, duel_id, a_id, b_id, data)
         if finished:
             duel_set_state(chat_id, duel_id, "done")
+
+            # определяем победителя по hp
+            a_hp = int(data["players"][str(a_id)]["hp"])
+            b_hp = int(data["players"][str(b_id)]["hp"])
+            winner = None
+            if a_hp > 0 and b_hp <= 0:
+                winner = a_id
+            elif b_hp > 0 and a_hp <= 0:
+                winner = b_id
+
+            if winner:
+                bank = duel_bet_payout(chat_id, duel_id, winner, now)
+                if bank > 0:
+                    body += f"\n\n💰 Банк: +{bank} tokens победителю."
+
             duel_update_data(chat_id, duel_id, data)
             try:
                 await cb.message.edit_text("🤠 ДУЭЛЬ • ЗАВЕРШЕНО\n\n" + body)
@@ -1828,7 +2440,7 @@ async def cb_duel_action(cb: CallbackQuery):
 # =======================
 # MESSAGE PIPELINE (logs + triggers)
 # =======================
-@dp.message()
+
 @dp.message()
 async def rep_by_reply(msg: Message):
     if not msg.text:
@@ -1871,6 +2483,7 @@ async def rep_by_reply(msg: Message):
 
     await msg.reply(f"{name}: {'+' if delta>0 else ''}{delta} репутации (итого {score})")
 
+@dp.message()
 async def any_message(msg: Message, bot: Bot):
     # логирование, триггеры, авто-приколы
     if not msg.chat:
@@ -1941,7 +2554,6 @@ async def any_message(msg: Message, bot: Bot):
     # авто-хайп
     if can_autohype(s, now) and random.random() < AUTO_HYPE_PROB:
         await handle_autohype(msg, chat_id, tz, now)
-
 
 # =======================
 # MAIN
