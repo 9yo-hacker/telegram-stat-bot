@@ -59,6 +59,21 @@ DUEL_CRIT_AFTER_AIM = 0.22
 DUEL_CRIT_DMG = 2
 DUEL_FUMBLE_PROB = 0.04
 
+SHOP_ITEMS = {
+    "title_neon": {"price": 250, "type": "title", "value": "⚡ NEON"},
+    "title_void": {"price": 400, "type": "title", "value": "🕳️ VOID"},
+    "duel_kit":   {"price": 150, "type": "consumable", "value": {"hp": 1, "ammo": 1}},  # одноразовый
+    "slot_charm": {"price": 200, "type": "consumable", "value": {"refund_pct": 30}},   # одноразовый “страховка”
+}
+
+RANKS = [
+    (0,    "🪨 Новичок"),
+    (200,  "🔧 Стажёр"),
+    (600,  "⚙️ Мастерок"),
+    (1500, "🧠 Архитектор"),
+    (3000, "👑 Легенда"),
+]
+
 # Эпики
 EPIC_ONE_HP = [
     "☠️ {name} едва держится. Следующий выстрел решит всё.",
@@ -359,7 +374,25 @@ def init_db():
         a_paid INTEGER NOT NULL DEFAULT 0,
         b_paid INTEGER NOT NULL DEFAULT 0
     )""")
+
     cur.execute("CREATE INDEX IF NOT EXISTS idx_duel_bets_chat ON duel_bets(chat_id)")
+    
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS inventory (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    item TEXT NOT NULL,
+    qty INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(chat_id, user_id, item)
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_profile (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT NULL,
+    PRIMARY KEY(chat_id, user_id)
+    )""")
 
     con.commit()
     con.close()
@@ -1315,6 +1348,16 @@ async def background_duel_watcher(bot: Bot):
                     except Exception:
                         dl = None
                     if dl and now > dl:
+                        bet_row = duel_bet_get(duel_id)
+                        if bet_row:
+                            _chat, bet, a_paid, b_paid = bet_row
+                            bet = int(bet)
+                            if bet > 0 and int(a_paid) == 1:
+                                wallet_add(chat_id, a_id, +bet)
+                                tx_log(chat_id, now, None, a_id, bet, "duel_bet_refund", meta=f"duel_id={duel_id},reason=expired")
+                            
+                            duel_bet_delete(duel_id)
+
                         duel_set_state(chat_id, duel_id, "done")
 
                 # 2) active: истёк раунд
@@ -1580,6 +1623,16 @@ def log_error(where: str, e: Exception):
     except Exception:
         pass
 
+def inv_add(chat_id: int, user_id: int, item: str, delta: int):
+    db_exec("""
+    INSERT INTO inventory(chat_id, user_id, item, qty) VALUES(?, ?, ?, ?)
+    ON CONFLICT(chat_id, user_id, item) DO UPDATE SET qty = qty + ?
+    """, (chat_id, user_id, item, int(delta), int(delta)))
+
+def inv_get(chat_id: int, user_id: int, item: str) -> int:
+    row = db_one("SELECT qty FROM inventory WHERE chat_id=? AND user_id=? AND item=?", (chat_id, user_id, item))
+    return int(row[0]) if row else 0
+
 # =======================
 # DISPATCHER
 # =======================
@@ -1659,6 +1712,31 @@ async def cmd_quiet(msg: Message, command: CommandObject):
     set_field(chat_id, "quiet_until", until)
     await msg.reply(f"🤫 Quiet включен до {fmt_dt(until, tz)}")
 
+@dp.message(Command("betinfo"))
+async def cmd_betinfo(msg: Message):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    if not msg.reply_to_message:
+        await msg.reply("Ответь на арену дуэли командой /betinfo")
+        return
+
+    arena_msg_id = msg.reply_to_message.message_id
+    active = duel_get_active_by_arena(chat_id, arena_msg_id)
+    if not active:
+        await msg.reply("Не вижу активную дуэль в этом сообщении.")
+        return
+
+    duel_id, a_id, b_id, _ = active
+    row = duel_bet_get(duel_id)
+    if not row:
+        await msg.reply("Ставок нет.")
+        return
+    _chat, bet, a_paid, b_paid = row
+    a_name = get_user_display(chat_id, a_id)
+    b_name = get_user_display(chat_id, b_id)
+    await msg.reply(f"💰 Ставка: {bet}\n{a_name} внес: {'✅' if a_paid else '❌'}\n{b_name} внес: {'✅' if b_paid else '❌'}")
 
 # =======================
 # REPUTATION
@@ -2016,6 +2094,70 @@ async def cmd_daily(msg: Message):
         f"💰 Баланс: {bal}"
     )
 
+@dp.message(Command("shop"))
+async def cmd_shop(msg: Message):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    lines = ["🛒 Магазин:"]
+    for k, v in SHOP_ITEMS.items():
+        lines.append(f"• {k} — {v['price']} tokens")
+    lines.append("\nКупить: /buy <item>")
+    await msg.reply("\n".join(lines))
+
+@dp.message(Command("buy"))
+async def cmd_buy(msg: Message, command: CommandObject):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    tz = s["tz"]
+    now = now_tz(tz)
+
+    uid = msg.from_user.id
+    item = (command.args or "").strip()
+    if item not in SHOP_ITEMS:
+        await msg.reply("Нет такого предмета. Смотри /shop")
+        return
+
+    price = int(SHOP_ITEMS[item]["price"])
+    bal = wallet_get(chat_id, uid)
+    if bal < price:
+        await msg.reply(f"Не хватает tokens. Нужно {price}, у тебя {bal}.")
+        return
+
+    wallet_add(chat_id, uid, -price)
+    pool_add(chat_id, "treasury", +price)
+    tx_log(chat_id, now, uid, None, price, "buy", meta=f"item={item}")
+
+    it = SHOP_ITEMS[item]
+    if it["type"] == "title":
+        db_exec("""
+        INSERT INTO user_profile(chat_id, user_id, title) VALUES(?, ?, ?)
+        ON CONFLICT(chat_id, user_id) DO UPDATE SET title=excluded.title
+        """, (chat_id, uid, it["value"]))
+        await msg.reply(f"✅ Куплено. Титул установлен: {it['value']}")
+    else:
+        inv_add(chat_id, uid, item, 1)
+        await msg.reply(f"✅ Куплено: {item} x1")
+
+@dp.message(Command("inv"))
+async def cmd_inv(msg: Message):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    uid = msg.from_user.id
+    rows = db_all("SELECT item, qty FROM inventory WHERE chat_id=? AND user_id=? AND qty>0", (chat_id, uid))
+    if not rows:
+        await msg.reply("🎒 Инвентарь пуст.")
+        return
+    lines = ["🎒 Инвентарь:"]
+    for it, q in rows:
+        lines.append(f"• {it} x{q}")
+    await msg.reply("\n".join(lines))
+
 # =======================
 # STATS
 # =======================
@@ -2064,6 +2206,35 @@ async def cmd_wordweek(msg: Message):
 
     set_field(chat_id, "last_interesting_at", now)
     await msg.reply(build_word_of_period(chat_id, tz, now, timedelta(days=7), "🧠 Слово недели"))
+
+#для вывода ранка
+def spent_in_shop(chat_id: int, user_id: int) -> int:
+    row = db_one("""
+        SELECT COALESCE(SUM(amount),0)
+        FROM token_tx
+        WHERE chat_id=? AND from_user_id=? AND kind='buy'
+    """, (chat_id, user_id))
+    return int(row[0]) if row else 0
+
+def rank_name(spent: int) -> str:
+    cur = RANKS[0][1]
+    for need, name in RANKS:
+        if spent >= need:
+            cur = name
+        else:
+            break
+    return cur
+
+@dp.message(Command("rank"))
+async def cmd_rank(msg: Message):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    uid = msg.from_user.id
+    sp = spent_in_shop(chat_id, uid)
+    r = rank_name(sp)
+    await msg.reply(f"🏷️ Ранг: {r}\n💸 Потрачено в магазине: {sp} tokens")
 
 # =======================
 # DUEL FLOW (invite / accept / decline / actions)
@@ -2520,6 +2691,8 @@ async def any_message(msg: Message, bot: Bot):
     # /rep, /duel, /luck и т.п.
     if text.lstrip().startswith("/"):
         return
+
+    print(f"[MSG] chat={msg.chat.id} from={msg.from_user.id} text={(msg.text or msg.caption or '')[:50]!r}")
 
     if text:
         add_words(chat_id, now, tokenize(text))
