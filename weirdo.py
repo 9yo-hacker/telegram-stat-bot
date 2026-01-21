@@ -35,7 +35,7 @@ AUTO_HYPE_PROB = 0.005
 
 DAILY_TRIGGER_LIMIT = 5
 POOP_AFTER_DAILY_LIMIT_PROB = 0.25
-MIN_EASTER_EVERY_MIN = 1
+MIN_EASTER_EVERY_MIN = 20
 MIN_AUTOHYPE_EVERY_HOURS = 6
 
 # Репутация
@@ -113,8 +113,8 @@ LUCK_BUFFS = [
 ]
 
 # Команды статистики (антиспам)
-WHEREALL_COOLDOWN_MIN = 20
-INTERESTING_COOLDOWN_MIN = 20
+WHEREALL_COOLDOWN_MIN = 1
+INTERESTING_COOLDOWN_MIN = 1
 
 # Храним “последнюю реплику” чата (для echo)
 _last_chat_text = {}  # chat_id -> str
