@@ -1,0 +1,35 @@
+# .NET / Visual Studio
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+*.sln.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+artifacts/
+publish/
+
+# EF Core
+**/Migrations/*.Designer.cs
+**/Migrations/*Snapshot.cs

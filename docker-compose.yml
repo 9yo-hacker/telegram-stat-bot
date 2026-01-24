@@ -1,0 +1,17 @@
+# docker-compose.yml
+services:
+  postgres:
+    image: postgres:16
+    container_name: tutor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tutor_platform
+      POSTGRES_USER: tutor
+      POSTGRES_PASSWORD: tutor_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - tutor_pgdata:/var/lib/postgresql/data
+
+volumes:
+  tutor_pgdata:
