@@ -17,6 +17,7 @@ Represents a platform user.
 - StudentCode (string, nullable, unique, only for Student)
 - IsActive (bool)
 - CreatedAt (datetime, UTC)
+- UpdatedAt (datetime, UTC)
 
 ### Relations
 - Teacher → Courses (1:N)
@@ -44,6 +45,7 @@ A course created by a teacher, containing lessons.
 - AccessMode (enum, post-MVP): BySessions | Manual | FullAccess
 - Status (enum: Draft | Published | Archived)
 - CreatedAt (datetime, UTC)
+- UpdatedAt (datetime, UTC)
 
 ### Relations
 - Course → Lessons (1:N)
