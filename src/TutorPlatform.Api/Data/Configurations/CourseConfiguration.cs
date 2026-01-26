@@ -16,6 +16,8 @@ public sealed class CourseConfiguration : IEntityTypeConfiguration<CourseEntity>
         b.Property(x => x.Description).IsRequired().HasMaxLength(2000);
         b.Property(x => x.DefaultVideoLink).HasMaxLength(2000);
 
+        b.Property(x => x.Status).IsRequired();
+
         b.Property(x => x.CreatedAt).IsRequired();
         b.Property(x => x.UpdatedAt).IsRequired();
 

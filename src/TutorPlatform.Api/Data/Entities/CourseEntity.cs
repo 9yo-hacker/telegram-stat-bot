@@ -8,6 +8,7 @@ public sealed class CourseEntity
     public string Title { get; set; } = null!;
     public string Description { get; set; } = null!;
     public string? DefaultVideoLink { get; set; }
+    public CourseStatus Status { get; set; } = CourseStatus.Draft;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 }

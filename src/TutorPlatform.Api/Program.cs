@@ -2,12 +2,16 @@ using TutorPlatform.Api.Common.Extensions;
 using TutorPlatform.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
+using TutorPlatform.Api.Application.Abstractions;
+using TutorPlatform.Api.Application.Courses;
+using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddScoped<ICourseService, CourseService>();
 
 builder.Services.AddDbContext<AppDbContext>(opt =>
 {
@@ -46,6 +50,11 @@ builder.Services.AddSwaggerGen(c =>
         }
     });
 });
+
+builder.Services
+    .AddControllers()
+    .AddJsonOptions(o =>
+        o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 var app = builder.Build();
 
