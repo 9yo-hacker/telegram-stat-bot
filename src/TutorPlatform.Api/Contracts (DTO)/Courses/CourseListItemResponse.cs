@@ -2,11 +2,9 @@ using TutorPlatform.Api.Data.Entities;
 
 namespace TutorPlatform.Api.Contracts.Courses;
 
-public record CourseResponse(
+public record CourseListItemResponse(
     Guid Id,
     string Title,
-    string Description,
-    string? DefaultVideoLink,
     CourseStatus Status,
     DateTime CreatedAt,
     DateTime UpdatedAt

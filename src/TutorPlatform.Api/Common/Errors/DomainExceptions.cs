@@ -11,7 +11,5 @@ public sealed class InvalidCredentialsException : Exception { }
 public sealed class InvalidRoleException : Exception
 {
     public InvalidRoleException(string? role)
-        : base($"Role must be Teacher or Student. Got: '{role}'.")
-    {
-    }
+        : base($"Role must be Teacher or Student. Got: '{role}'.") { }
 }
