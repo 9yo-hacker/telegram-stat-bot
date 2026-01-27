@@ -10,22 +10,22 @@
 
 ## Auth
 
-1. Register Teacher -> can login -> token works
-2. Register Student -> studentCode generated (8-10 digits) -> can login
-3. Login fails with wrong password
-4. Email uniqueness enforced
+1. Register Teacher -> can login -> token works [x] checked
+2. Register Student -> studentCode generated (8-10 digits) -> can login [x] checked
+3. Login fails with wrong password [x] checked
+4. Email uniqueness enforced [x] checked (409)
 
 ------------------------------------------------------------
 
 ## Courses (Teacher)
 
-5. Teacher A creates course -> visible in Teacher A list
-6. Teacher B cannot access Teacher A course -> 404 - suggestion to use 404 to not show if it is even exists
-7. Teacher A updates his course fields
-8. Teacher A/B updates not exist course -> 404
-9. Teacher A tries to update course of teacher B -> 404 
-10. Teacher A archives course (status=Archived) -> remains in list or filtered (expected behavior defined)
-11. Teacher A tries update his archived course -> 200 OK
+5. Teacher A creates course -> visible in Teacher A list [x] checked
+6. Teacher B cannot access Teacher A course -> 404 - suggestion to use 404 to not show if it is even exists [x] checked
+7. Teacher A updates his course fields -> Код ответа 204 no content - не верный , должен быть 200 ok, мы в процессе обсуждения частичного обновления сущностей, в данный момент отправлять надо все поля даже если меняется одно 
+8. Teacher A/B updates not exist course -> 404 [x] checked
+9. Teacher A tries to update course of teacher B -> 404 [x] checked
+10. Teacher A archives course (status=Archived) -> remains in list or filtered (expected behavior defined) [x] checked
+11. Teacher A tries update his archived course -> 200 OK [x] checked
 
 ------------------------------------------------------------
 
