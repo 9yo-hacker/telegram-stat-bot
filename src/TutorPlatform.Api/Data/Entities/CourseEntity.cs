@@ -14,5 +14,5 @@ public sealed class CourseEntity
 
     public ICollection<LessonEntity> Lessons { get; set; } = new List<LessonEntity>();
     public ICollection<EnrollmentEntity> Enrollments { get; set; } = new List<EnrollmentEntity>();
-
+    public ICollection<SessionEntity> Sessions { get; set; } = new List<SessionEntity>();
 }

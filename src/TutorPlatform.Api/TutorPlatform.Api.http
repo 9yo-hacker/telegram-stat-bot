@@ -1,6 +1,45 @@
-@TutorPlatform.Api_HostAddress = http://localhost:5141
+@host = http://127.0.0.1:5141
 
-GET {{TutorPlatform.Api_HostAddress}}/weatherforecast/
-Accept: application/json
+### Seed
+# @name seed
+POST {{host}}/api/dev/seed
+X-Dev-Seed: 1
 
-###
+### Vars from seed
+@teacherToken = {{seed.response.body.$.teacherToken}}
+@studentToken = {{seed.response.body.$.studentToken}}
+@courseId = {{seed.response.body.$.courseId}}
+@lessonId = {{seed.response.body.$.lessonId}}
+@studentId = {{seed.response.body.$.studentId}}
+
+### Teacher: Create session
+# @name createSession
+POST {{host}}/api/sessions
+Authorization: Bearer {{teacherToken}}
+Content-Type: application/json
+
+{
+  "courseId": "{{courseId}}",
+  "studentId": "{{studentId}}",
+  "startsAt": "2026-01-28T21:24:40.917Z",
+  "durationMinutes": 60,
+  "lessonId": "{{lessonId}}",
+  "videoLink": null,
+  "notes": "dev test"
+}
+
+### Vars from createSession
+@sessionId = {{createSession.response.body.$.id}}
+
+### Teacher: Complete session
+POST {{host}}/api/sessions/{{sessionId}}/complete
+Authorization: Bearer {{teacherToken}}
+
+### Student: My sessions list
+GET {{host}}/api/my/sessions
+Authorization: Bearer {{studentToken}}
+
+### Student: My session details
+GET {{host}}/api/my/sessions/{{sessionId}}
+Authorization: Bearer {{studentToken}}
+

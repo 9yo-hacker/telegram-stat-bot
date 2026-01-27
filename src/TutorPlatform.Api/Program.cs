@@ -7,6 +7,7 @@ using TutorPlatform.Api.Application.Courses;
 using System.Text.Json.Serialization;
 using TutorPlatform.Api.Application.Lessons;
 using TutorPlatform.Api.Application.Enrollments;
+using TutorPlatform.Api.Application.Sessions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,6 +17,7 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddScoped<ICourseService, CourseService>();
 builder.Services.AddScoped<ILessonService, LessonService>();
 builder.Services.AddScoped<IEnrollmentService, EnrollmentService>();
+builder.Services.AddScoped<ISessionService, SessionService>();
 
 builder.Services.AddDbContext<AppDbContext>(opt =>
 {
