@@ -21,7 +21,7 @@
 
 5. Teacher A creates course -> visible in Teacher A list [x] checked
 6. Teacher B cannot access Teacher A course -> 404 - suggestion to use 404 to not show if it is even exists [x] checked
-7. Teacher A updates his course fields -> Код ответа 204 no content - не верный , должен быть 200 ok, мы в процессе обсуждения частичного обновления сущностей, в данный момент отправлять надо все поля даже если меняется одно 
+7. Teacher A updates his course fields -> 204 no content. Требуется перетестирование при заливке частичного обновления (в данный момент отправлять надо все поля даже если меняется одно)
 8. Teacher A/B updates not exist course -> 404 [x] checked
 9. Teacher A tries to update course of teacher B -> 404 [x] checked
 10. Teacher A archives course (status=Archived) -> remains in list or filtered (expected behavior defined) [x] checked
