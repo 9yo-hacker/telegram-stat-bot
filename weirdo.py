@@ -73,6 +73,30 @@ RANKS = [
     (1500, "🧠 Архитектор"),
     (3000, "👑 Легенда"),
 ]
+REP_RANKS = [
+    (0,   "😶 no-name"),
+    (50,  "🙂 заметный"),
+    (200,  "😎 уважаемый"),
+    (500,  "🧠 авторитет"),
+    (1000, "👑 легенда чата"),
+]
+
+WIN_RANKS = [
+    (0,    "🪙 новичок"),
+    (300,  "💰 копилка"),
+    (1000, "🏦 игрок"),
+    (2500, "💎 богач"),
+    (6000, "👑 магнат"),
+]
+
+CHAT_RANKS = [
+    (0,    "🫥 молчун"),
+    (50,   "💬 в теме"),
+    (500,  "🗣️ активист"),
+    (1500,  "📣 голос чата"),
+    (5000, "🔥 двигатель"),
+]
+
 
 # Эпики
 EPIC_ONE_HP = [
@@ -100,7 +124,7 @@ EPIC_CRIT = [
 ]
 
 # /luck
-LUCK_COOLDOWN_MIN = 30
+LUCK_COOLDOWN_MIN = 120
 LUCK_REP_MIN = 1
 LUCK_REP_MAX = 5
 
@@ -394,6 +418,28 @@ def init_db():
     PRIMARY KEY(chat_id, user_id)
     )""")
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_stats (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+
+        msg_count INTEGER NOT NULL DEFAULT 0,
+
+        tokens_earned INTEGER NOT NULL DEFAULT 0,  -- всего получено токенов (daily, выигрыши, банк дуэли)
+        tokens_spent  INTEGER NOT NULL DEFAULT 0,  -- всего потрачено (ставки, покупки)
+
+        slot_spent INTEGER NOT NULL DEFAULT 0,
+        slot_won   INTEGER NOT NULL DEFAULT 0,     -- выплаты по слотам (включая джекпот)
+
+        duel_wins   INTEGER NOT NULL DEFAULT 0,
+        duel_losses INTEGER NOT NULL DEFAULT 0,
+        duel_bank_won INTEGER NOT NULL DEFAULT 0,  -- сколько токенов выиграно банками дуэлей
+
+        updated_at TEXT,
+
+        PRIMARY KEY(chat_id, user_id)
+    )""")
+
     con.commit()
     con.close()
 
@@ -571,7 +617,7 @@ def rep_mark_vote(chat_id: int, from_id: int, to_id: int, now: datetime):
 # TOKENS WALLET
 # =======================
 MAX_BET = 200
-SLOT_COOLDOWN_MIN = 30
+SLOT_COOLDOWN_MIN = 10
 PAY_FEE_PCT = 3  # комиссия на переводы, %
 
 def wallet_get(chat_id: int, user_id: int) -> int:
@@ -606,6 +652,23 @@ def pool_add(chat_id: int, table: str, delta: int):
     INSERT INTO {table}(chat_id, amount) VALUES(?, ?)
     ON CONFLICT(chat_id) DO UPDATE SET amount = amount + ?
     """, (chat_id, int(delta), int(delta)))
+
+def econ_snapshot(chat_id: int) -> dict:
+    total_wallet = db_one("SELECT COALESCE(SUM(balance),0) FROM wallet WHERE chat_id=?", (chat_id,))
+    total_wallet = int(total_wallet[0]) if total_wallet else 0
+
+    holders = db_one("SELECT COUNT(*) FROM wallet WHERE chat_id=? AND balance>0", (chat_id,))
+    holders = int(holders[0]) if holders else 0
+
+    treasury = pool_get(chat_id, "treasury")
+    jackpot = pool_get(chat_id, "jackpot_pool")
+
+    return {
+        "total_wallet": total_wallet,
+        "holders": holders,
+        "treasury": int(treasury),
+        "jackpot": int(jackpot),
+    }
 
 def pool_set(chat_id: int, table: str, value: int):
     value = max(0, int(value))
@@ -677,6 +740,10 @@ def duel_bet_set_paid(duel_id: str, a_paid: int | None = None, b_paid: int | Non
 def duel_bet_delete(duel_id: str):
     db_exec("DELETE FROM duel_bets WHERE duel_id=?", (duel_id,))
 
+def duel_mark_loss(chat_id: int, duel_id: str, loser_id: int, now: datetime):
+    # проигрыш учитываем один раз: если дуэль уже удалена из ставок, всё равно можно писать loss
+    stats_inc(chat_id, loser_id, "duel_losses", 1, now)
+
 def duel_bet_payout(chat_id: int, duel_id: str, winner_id: int, now: datetime):
     row = duel_bet_get(duel_id)
     if not row:
@@ -689,6 +756,12 @@ def duel_bet_payout(chat_id: int, duel_id: str, winner_id: int, now: datetime):
 
     bank = bet * 2
     wallet_add(chat_id, winner_id, bank)
+
+    # победителю начислили банк — это "выигрыш общий"
+    stats_inc(chat_id, winner_id, "tokens_earned", bank, now)
+    stats_inc(chat_id, winner_id, "duel_bank_won", bank, now)
+    stats_inc(chat_id, winner_id, "duel_wins", 1, now)
+
     tx_log(chat_id, now, None, winner_id, bank, "duel_bet_payout", meta=f"duel_id={duel_id},bet={bet}")
     duel_bet_delete(duel_id)
     return bank
@@ -702,10 +775,16 @@ TREASURY_PCT = 2  # % в казну
 
 # таблицы выплат: (multiplier, weight)
 SLOT_TABLES = {
-    "low":  [(0.0, 55), (0.5, 20), (1.0, 15), (1.5, 7), (2.0, 3)],
-    "mid":  [(0.0, 60), (0.5, 10), (1.0, 14), (2.0, 10), (3.0, 5), (5.0, 1)],
-    "high": [(0.0, 72), (0.5, 6),  (1.0, 8),  (2.0, 7),  (4.0, 5), (8.0, 2)],
+    # почти безопасно, около нуля/чуть в плюс
+    "low":  [(0.0, 14), (0.5, 16), (1.0, 45), (1.5, 16), (2.0, 6), (3.0, 2), (5.0, 1)],
+
+    # в среднем около нуля
+    "mid":  [(0.0, 18), (0.5, 15), (1.0, 40), (1.5, 15), (2.0, 8), (3.0, 3), (5.0, 1)],
+
+    # риск выше (можно оставить около нуля/слегка минус, но с шансом больших x)
+    "high": [(0.0, 28), (0.5, 12), (1.0, 28), (2.0, 18), (4.0, 10), (8.0, 4)],
 }
+
 
 JACKPOT_CHANCE = {  # шанс “сорвать банк”
     "low":  0.002,
@@ -1283,6 +1362,110 @@ def duel_resolve_round(chat_id: int, duel_id: str, a_id: int, b_id: int, data: d
     return body, False
 
 # =======================
+# STATS HELPERS
+# =======================
+def stats_ensure(chat_id: int, user_id: int, now: datetime | None = None):
+    ts = now.isoformat() if isinstance(now, datetime) else None
+    db_exec("""
+    INSERT INTO user_stats(chat_id, user_id, updated_at)
+    VALUES(?, ?, ?)
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET updated_at=COALESCE(excluded.updated_at, updated_at)
+    """, (chat_id, user_id, ts))
+
+def stats_inc(chat_id: int, user_id: int, field: str, delta: int, now: datetime | None = None):
+    # защита от кривого field
+    allowed = {
+        "msg_count",
+        "tokens_earned", "tokens_spent",
+        "slot_spent", "slot_won",
+        "duel_wins", "duel_losses", "duel_bank_won",
+    }
+    if field not in allowed:
+        return
+    stats_ensure(chat_id, user_id, now)
+    ts = now.isoformat() if isinstance(now, datetime) else None
+    db_exec(f"""
+    UPDATE user_stats
+    SET {field} = {field} + ?,
+        updated_at = COALESCE(?, updated_at)
+    WHERE chat_id=? AND user_id=?
+    """, (int(delta), ts, chat_id, user_id))
+
+def stats_get(chat_id: int, user_id: int) -> dict:
+    row = db_one("""
+    SELECT msg_count, tokens_earned, tokens_spent,
+           slot_spent, slot_won,
+           duel_wins, duel_losses, duel_bank_won
+    FROM user_stats
+    WHERE chat_id=? AND user_id=?
+    """, (chat_id, user_id))
+
+    if not row:
+        return {
+            "msg_count": 0,
+            "tokens_earned": 0,
+            "tokens_spent": 0,
+            "slot_spent": 0,
+            "slot_won": 0,
+            "duel_wins": 0,
+            "duel_losses": 0,
+            "duel_bank_won": 0,
+        }
+
+    return {
+        "msg_count": int(row[0]),
+        "tokens_earned": int(row[1]),
+        "tokens_spent": int(row[2]),
+        "slot_spent": int(row[3]),
+        "slot_won": int(row[4]),
+        "duel_wins": int(row[5]),
+        "duel_losses": int(row[6]),
+        "duel_bank_won": int(row[7]),
+    }
+
+def _rank_by(value: int, table: list[tuple[int, str]]) -> str:
+    cur = table[0][1]
+    for need, name in table:
+        if value >= need:
+            cur = name
+        else:
+            break
+    return cur
+
+def rep_rank(chat_id: int, user_id: int) -> str:
+    return _rank_by(rep_get(chat_id, user_id), REP_RANKS)
+
+def win_rank(chat_id: int, user_id: int) -> str:
+    st = stats_get(chat_id, user_id)
+    # "выигрыши общие" — считаю как ВСЕ полученные токены (daily + выигрыши + банки дуэлей)
+    earned = st["tokens_earned"]
+    return _rank_by(earned, WIN_RANKS)
+
+def chat_rank(chat_id: int, user_id: int) -> str:
+    st = stats_get(chat_id, user_id)
+    return _rank_by(st["msg_count"], CHAT_RANKS)
+
+def overall_rank(chat_id: int, user_id: int) -> str:
+    st = stats_get(chat_id, user_id)
+    rep = rep_get(chat_id, user_id)
+    earned = st["tokens_earned"]
+    profit = earned - st["tokens_spent"]
+    msgs = st["msg_count"]
+    duel_wins = st["duel_wins"]
+
+    # общий рейтинг (простая формула, потом настроим)
+    score = rep * 10 + duel_wins * 50 + max(0, profit) // 20 + msgs // 50
+
+    OVERALL = [
+        (0,    "🪨 нуб"),
+        (200,  "🔧 стажёр"),
+        (600,  "⚙️ игрок"),
+        (1500, "🧠 олд"),
+        (3000, "👑 босс"),
+    ]
+    return _rank_by(score, OVERALL)
+
+# =======================
 # CHAT MODERATION HELPERS
 # =======================
 def chat_is_quiet(s: dict, now: datetime) -> bool:
@@ -1405,6 +1588,9 @@ async def background_duel_watcher(bot: Bot):
                                 winner = b_id
 
                             if winner:
+                                loser = b_id if winner == a_id else a_id
+                                duel_mark_loss(chat_id, duel_id, loser, now)
+
                                 bank = duel_bet_payout(chat_id, duel_id, winner, now)
                                 if bank > 0:
                                     body += f"\n\n💰 Банк: +{bank} tokens победителю."
@@ -1476,22 +1662,43 @@ def update_user_cache_from_message(chat_id: int, msg: Message, now: datetime):
 
 async def reply_help(msg: Message):
     text = (
-        "Команды:\n"
-        "• /on, /off — включить/выключить бота в чате\n"
+        "Команды:\n\n"
+
+        "⚙️ Управление\n"
+        "• /on — включить бота в чате\n"
+        "• /off — выключить бота в чате\n"
         "• /tz Europe/Moscow — часовой пояс чата\n"
-        "• /quiet 30m | 2h | 1d | off — тихий режим\n"
-        "• /rep @user + | /rep @user - | /repme — репа\n"
-        "• /toprep — топ по репутации\n"
-        "• /luck — слоты (раз в 30 минут)\n"
-        "• /duel @user — вызвать на дуэль\n"
-        "• /whereall — кто сколько писал за 24ч\n"
-        "• /interesting — топ-слова/фразы за 24ч\n"
-        "• /balance — tokens баланс + jackpot\n"
-        "• /pay @user 50 — перевод tokens (комиссия)\n"
-        "• /slot 50 [low|mid|high] — слоты на tokens (кд 30м, макс 200)\n"
-        "• /daily — ежедневный дроп tokens\n"
+        "• /quiet 30m | 2h | 1d | off — тихий режим\n\n"
+
+        "⭐ Репутация\n"
+        "• /rep @user + | /rep @user - — репа (или reply)\n"
+        "• + / - (в ответ на сообщение) — быстрый плюс/минус\n"
+        "• /repme — моя репа\n"
+        "• /toprep — топ репы\n\n"
+
+        "🤠 Дуэли\n"
+        "• /duel @user [ставка] — вызов на дуэль (макс 200)\n"
+        "• /betinfo — (reply на арену) статус ставки\n\n"
+
+        "📊 Статистика\n"
+        "• /me или /profile — игровой профиль (ранги/стата)\n"
+        "• /whereall [day|week|month] — активность за период (по умолчанию 24ч)\n"
+        "• /interesting — интересное за 24ч\n"
+        "• /wordweek — слово недели\n\n"
+
+        "💰 Tokens-экономика\n"
+        "• /balance — баланс tokens + jackpot\n"
+        "• /pay @user <amount> — перевод tokens (комиссия в казну)\n"
+        "• /slot <bet> [low|mid|high] — слоты (КД 10 минут, макс ставка 200)\n"
+        "• /daily — ежедневный дроп tokens + стрик\n"
+        "• /shop — магазин\n"
+        "• /buy <item> — купить предмет\n"
+        "• /inv — инвентарь\n"
+        "• /rank — ранг по потраченному в магазине\n"
+        "• /econ — сводка экономики чата (сколько в кошельках, казне, джекпоте)"
     )
     await msg.reply(text)
+
 
 def parse_duration_to_until(now: datetime, arg: str) -> datetime | None:
     a = (arg or "").strip().lower()
@@ -1891,6 +2098,28 @@ async def cmd_balance(msg: Message):
     jp = pool_get(chat_id, "jackpot_pool")
     await msg.reply(f"💰 Tokens: {bal}\n👑 Jackpot: {jp}")
 
+@dp.message(Command("econ"))
+async def cmd_econ(msg: Message):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    tz = s["tz"]
+    now = now_tz(tz)
+    if chat_is_quiet(s, now):
+        return
+
+    snap = econ_snapshot(chat_id)
+
+    await msg.reply(
+        "📉 Экономика чата (tokens)\n"
+        f"👛 В кошельках всего: {snap['total_wallet']}\n"
+        f"👥 У кого баланс > 0: {snap['holders']}\n"
+        f"🏦 Казна: {snap['treasury']}\n"
+        f"👑 Джекпот: {snap['jackpot']}\n"
+        f"🧾 Всего в системе: {snap['total_wallet'] + snap['treasury'] + snap['jackpot']}"
+    )
+
 @dp.message(Command("pay"))
 async def cmd_pay(msg: Message, command: CommandObject):
     chat_id = msg.chat.id
@@ -1984,6 +2213,9 @@ async def cmd_slot(msg: Message, command: CommandObject):
     # списали ставку
     wallet_add(chat_id, uid, -bet)
 
+    stats_inc(chat_id, uid, "tokens_spent", bet, now)
+    stats_inc(chat_id, uid, "slot_spent", bet, now)
+
     # распределили проценты
     jp_add = (bet * JACKPOT_PCT) // 100
     tr_add = (bet * TREASURY_PCT) // 100
@@ -2006,6 +2238,9 @@ async def cmd_slot(msg: Message, command: CommandObject):
 
     if win > 0:
         wallet_add(chat_id, uid, +win)
+
+        stats_inc(chat_id, uid, "tokens_earned", win, now)
+        stats_inc(chat_id, uid, "slot_won", win, now)
 
     slot_mark_spin(chat_id, uid, now)
     tx_log(chat_id, now, uid, None, bet, "slot_bet", meta=f"mode={mode}")
@@ -2065,7 +2300,7 @@ async def cmd_daily(msg: Message):
         streak = 1
 
     # базовый дроп
-    base = random.randint(10, 25)
+    base = random.randint(25, 50)
 
     # бонус за активность за 24ч: +0..+10
     since = now - timedelta(hours=24)
@@ -2082,6 +2317,7 @@ async def cmd_daily(msg: Message):
     amount = base + bonus + streak_bonus
 
     wallet_add(chat_id, uid, amount)
+    stats_inc(chat_id, uid, "tokens_earned", amount, now)
     daily_mark_claim(chat_id, uid, day)
     daily_streak_set(chat_id, uid, now, streak)
     tx_log(chat_id, now, None, uid, amount, "daily", meta=f"base={base},bonus={bonus},streak={streak},msg24h={c}")
@@ -2128,6 +2364,7 @@ async def cmd_buy(msg: Message, command: CommandObject):
         return
 
     wallet_add(chat_id, uid, -price)
+    stats_inc(chat_id, uid, "tokens_spent", price, now)
     pool_add(chat_id, "treasury", +price)
     tx_log(chat_id, now, uid, None, price, "buy", meta=f"item={item}")
 
@@ -2235,6 +2472,44 @@ async def cmd_rank(msg: Message):
     sp = spent_in_shop(chat_id, uid)
     r = rank_name(sp)
     await msg.reply(f"🏷️ Ранг: {r}\n💸 Потрачено в магазине: {sp} tokens")
+
+@dp.message(Command("profile"))
+@dp.message(Command("me"))
+async def cmd_profile(msg: Message):
+    chat_id = msg.chat.id
+    s = get_settings(chat_id)
+    if not s["enabled"]:
+        return
+    tz = s["tz"]
+    now = now_tz(tz)
+    if chat_is_quiet(s, now):
+        return
+
+    update_user_cache_from_message(chat_id, msg, now)
+
+    uid = msg.from_user.id
+    name = get_user_display(chat_id, uid)
+
+    st = stats_get(chat_id, uid)
+    rep = rep_get(chat_id, uid)
+
+    earned = st["tokens_earned"]
+    spent = st["tokens_spent"]
+    profit = earned - spent
+
+    bal = wallet_get(chat_id, uid)
+
+    await msg.reply(
+        f"🎮 Профиль: {name}\n\n"
+        f"🏷️ Общий ранг: {overall_rank(chat_id, uid)}\n"
+        f"⭐ Ранг по репе: {rep_rank(chat_id, uid)} (репа {rep})\n"
+        f"💰 Ранг по выигрышам: {win_rank(chat_id, uid)} (получено {earned})\n"
+        f"💬 Ранг по активности: {chat_rank(chat_id, uid)} (сообщений {st['msg_count']})\n\n"
+        f"⚔️ Дуэли: ✅ {st['duel_wins']} / ❌ {st['duel_losses']}  | банк выигран: {st['duel_bank_won']}\n"
+        f"🎰 Слоты: потрачено {st['slot_spent']} / выиграно {st['slot_won']}\n"
+        f"📈 Профит (получено-потрачено): {profit}\n"
+        f"👛 Баланс сейчас: {bal}"
+    )
 
 # =======================
 # DUEL FLOW (invite / accept / decline / actions)
@@ -2612,7 +2887,7 @@ async def cb_duel_action(cb: CallbackQuery):
 # MESSAGE PIPELINE (logs + triggers)
 # =======================
 
-@dp.message()
+@dp.message(F.text.in_({"+", "++", "+++", "-", "--", "---"}))
 async def rep_by_reply(msg: Message):
     if not msg.text:
         return
@@ -2742,7 +3017,6 @@ async def main():
     asyncio.create_task(background_duel_watcher(bot))
 
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
