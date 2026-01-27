@@ -7,7 +7,7 @@ MVP focus: courses/lessons (teacher library), enrollments, sessions (planned/liv
 
 ----------------------------------------------
 
-## Quick start
+## Quick start for the first time
 
 ### 1) Requirements
 - .NET SDK 8+
@@ -55,6 +55,41 @@ http://localhost:port
 ```
 
 To stop the PostgreSQL after stopping the app
+```bash
+cd ~/tutor-platform
+docker compose down
+```
+
+## Quick start for daily usage
+
+### 1. Run PostgreSQL
+```bash
+cd ~/tutor-platform
+docker compose up -d
+```
+
+### 2. Approve migration (if not done before)
+```bash
+cd src/TutorPlatform.Api
+```
+### Only if locally installed dotnet-ef:
+```bash
+dotnet tool restore
+```
+
+### Approve migration (do it every time — safe even if was already made)
+```bash
+dotnet ef database update --context AppDbContext
+```
+
+### 3. Run backend
+```bash
+dotnet run
+```
+
+## 1. To stop backend: press Ctrl+C in terminal
+
+### 2. Stop PostgreSQL (data will be saved)
 ```bash
 cd ~/tutor-platform
 docker compose down
