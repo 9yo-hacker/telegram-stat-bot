@@ -5,6 +5,7 @@ using Microsoft.OpenApi.Models;
 using TutorPlatform.Api.Application.Abstractions;
 using TutorPlatform.Api.Application.Courses;
 using System.Text.Json.Serialization;
+using TutorPlatform.Api.Application.Lessons;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,6 +13,7 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddScoped<ICourseService, CourseService>();
+builder.Services.AddScoped<ILessonService, LessonService>();
 
 builder.Services.AddDbContext<AppDbContext>(opt =>
 {
