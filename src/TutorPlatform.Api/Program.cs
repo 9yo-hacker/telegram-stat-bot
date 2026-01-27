@@ -8,6 +8,7 @@ using System.Text.Json.Serialization;
 using TutorPlatform.Api.Application.Lessons;
 using TutorPlatform.Api.Application.Enrollments;
 using TutorPlatform.Api.Application.Sessions;
+using TutorPlatform.Api.Application.Homework;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,6 +19,7 @@ builder.Services.AddScoped<ICourseService, CourseService>();
 builder.Services.AddScoped<ILessonService, LessonService>();
 builder.Services.AddScoped<IEnrollmentService, EnrollmentService>();
 builder.Services.AddScoped<ISessionService, SessionService>();
+builder.Services.AddScoped<IHomeworkService, HomeworkService>();
 
 builder.Services.AddDbContext<AppDbContext>(opt =>
 {

@@ -12,6 +12,7 @@ public sealed class AppDbContext : DbContext
     public DbSet<LessonEntity> Lessons => Set<LessonEntity>();
     public DbSet<EnrollmentEntity> Enrollments => Set<EnrollmentEntity>();
     public DbSet<SessionEntity> Sessions => Set<SessionEntity>();
+    public DbSet<HomeworkItemEntity> HomeworkItems => Set<HomeworkItemEntity>();
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);

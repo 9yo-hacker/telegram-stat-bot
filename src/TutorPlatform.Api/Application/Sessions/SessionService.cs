@@ -169,7 +169,6 @@ public class SessionService : ISessionService
 
     public async Task<MySessionDetailsResponse?> GetMySessionAsync(Guid studentId, Guid sessionId, CancellationToken ct)
     {
-        // Нужно: videoLinkEffective = session.videoLink ?? course.defaultVideoLink
         // Planned: live lesson materialUrl
         // Done: snapshot fields
 

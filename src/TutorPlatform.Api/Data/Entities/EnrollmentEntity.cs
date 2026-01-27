@@ -12,4 +12,7 @@ public class EnrollmentEntity
     public DateTime UpdatedAt { get; set; }
     public CourseEntity Course { get; set; } = null!;
     public UserEntity Student { get; set; } = null!;
+
+    public ICollection<HomeworkItemEntity> HomeworkItems { get; set; } = new List<HomeworkItemEntity>();
+
 }
