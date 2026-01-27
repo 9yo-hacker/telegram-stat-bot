@@ -61,22 +61,33 @@ public class CourseService : ICourseService
 
     public async Task<bool> UpdateAsync(Guid teacherId, Guid courseId, UpdateCourseRequest req, CancellationToken ct)
     {
-        Validate(req.Title, req.Description, req.DefaultVideoLink);
+        ValidatePatch(req);
 
         var course = await _db.Courses
             .FirstOrDefaultAsync(c => c.Id == courseId && c.TeacherId == teacherId, ct);
 
         if (course is null) return false;
 
-        course.Title = req.Title.Trim();
-        course.Description = req.Description.Trim();
-        course.DefaultVideoLink = string.IsNullOrWhiteSpace(req.DefaultVideoLink) ? null : req.DefaultVideoLink.Trim();
-        course.Status = req.Status;
+        if (req.Title is not null)
+            course.Title = req.Title.Trim();
+
+        if (req.Description is not null)
+            course.Description = req.Description.Trim();
+
+        if (req.DefaultVideoLink is not null)
+            course.DefaultVideoLink = string.IsNullOrWhiteSpace(req.DefaultVideoLink)
+                ? null
+                : req.DefaultVideoLink.Trim();
+
+        if (req.Status is not null)
+            course.Status = req.Status.Value;
+
         course.UpdatedAt = DateTime.UtcNow;
 
         await _db.SaveChangesAsync(ct);
         return true;
     }
+
 
     public async Task<bool> ArchiveAsync(Guid teacherId, Guid courseId, CancellationToken ct)
     {
@@ -102,5 +113,27 @@ public class CourseService : ICourseService
 
         if (defaultVideoLink is not null && defaultVideoLink.Length > 2000)
             throw new ArgumentException("DefaultVideoLink must be <= 2000 chars.");
+    }
+
+    private static void ValidatePatch(UpdateCourseRequest req)
+    {
+        if (req.Title is not null && string.IsNullOrWhiteSpace(req.Title))
+            throw new CannotUnloadAppDomainException("Title cannot be empty.");
+
+        if (req.Description is not null && string.IsNullOrWhiteSpace(req.Description))
+            throw new CannotUnloadAppDomainException("Description cannot be empty.");
+
+        if (req.DefaultVideoLink is not null && !string.IsNullOrWhiteSpace(req.DefaultVideoLink))
+        {
+            var v = req.DefaultVideoLink.Trim();
+            if (v.Length > 2000)
+                throw new CannotUnloadAppDomainException("DefaultVideoLink is too long.");
+        }
+
+        if (req.Status is not null && !Enum.IsDefined(typeof(CourseStatus), req.Status.Value))
+            throw new CannotUnloadAppDomainException("Status is invalid.");
+
+        if (req.Title is null && req.Description is null && req.DefaultVideoLink is null && req.Status is null)
+            throw new CannotUnloadAppDomainException("No fields to update.");
     }
 }
