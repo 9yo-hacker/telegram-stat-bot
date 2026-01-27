@@ -98,7 +98,7 @@ public sealed class AuthService
         // MVP: простой retry. Гарантия всё равно на unique index.
         for (var attempt = 0; attempt < 20; attempt++)
         {
-            var code = RandomDigits(9); // 8-10 как хочешь (9 ок)
+            var code = RandomDigits(9); 
             var exists = await _db.Users.AnyAsync(x => x.StudentCode == code, ct);
             if (!exists) return code;
         }

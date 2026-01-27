@@ -13,4 +13,6 @@ public sealed class CourseEntity
     public DateTime UpdatedAt { get; set; }
 
     public ICollection<LessonEntity> Lessons { get; set; } = new List<LessonEntity>();
+    public ICollection<EnrollmentEntity> Enrollments { get; set; } = new List<EnrollmentEntity>();
+
 }

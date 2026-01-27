@@ -11,4 +11,7 @@ public sealed class UserEntity
     public bool IsActive { get; set; } = true;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+
+    public ICollection<EnrollmentEntity> Enrollments { get; set; } = new List<EnrollmentEntity>();
+
 }
