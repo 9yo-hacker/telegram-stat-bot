@@ -11,4 +11,6 @@ public sealed class CourseEntity
     public CourseStatus Status { get; set; } = CourseStatus.Draft;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+
+    public ICollection<LessonEntity> Lessons { get; set; } = new List<LessonEntity>();
 }
