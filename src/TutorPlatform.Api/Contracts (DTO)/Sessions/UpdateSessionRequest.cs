@@ -9,6 +9,7 @@ public record UpdateSessionRequest(
     int? DurationMinutes,
     Guid? LessonId,
     string? VideoLink,
+    // минимум не опредеялть, а максимум 2000 символов
     string? Notes,
     SessionStatus? Status // разрешим Planned/Canceled, Done — только через /complete
 );
