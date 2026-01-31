@@ -5,6 +5,12 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TutorPlatform.Api", "TutorPlatform.Api\TutorPlatform.Api.csproj", "{52AF136B-7628-48A8-94BE-5AE02A830F10}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "TutorPlatform.Api.Tests", "TutorPlatform.Api.Tests", "{2F699711-D48C-480E-B38A-6B557F5AA74B}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{125D6E00-32CB-4FD0-A3B0-E26803BC0D89}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TutorPlatform.Api.Tests", "TutorPlatform.Api.Tests\TutorPlatform.Api.Tests.csproj", "{67F3BB75-7730-425C-9063-6D50612AE54A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -18,5 +24,17 @@ Global
 		{52AF136B-7628-48A8-94BE-5AE02A830F10}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{52AF136B-7628-48A8-94BE-5AE02A830F10}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{52AF136B-7628-48A8-94BE-5AE02A830F10}.Release|Any CPU.Build.0 = Release|Any CPU
+		{630BB26E-C59D-4B17-AA9A-4EAD8CCFDDC2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{630BB26E-C59D-4B17-AA9A-4EAD8CCFDDC2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{630BB26E-C59D-4B17-AA9A-4EAD8CCFDDC2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{630BB26E-C59D-4B17-AA9A-4EAD8CCFDDC2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{67F3BB75-7730-425C-9063-6D50612AE54A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{67F3BB75-7730-425C-9063-6D50612AE54A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{67F3BB75-7730-425C-9063-6D50612AE54A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{67F3BB75-7730-425C-9063-6D50612AE54A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{125D6E00-32CB-4FD0-A3B0-E26803BC0D89} = {2F699711-D48C-480E-B38A-6B557F5AA74B}
+		{67F3BB75-7730-425C-9063-6D50612AE54A} = {2F699711-D48C-480E-B38A-6B557F5AA74B}
 	EndGlobalSection
 EndGlobal

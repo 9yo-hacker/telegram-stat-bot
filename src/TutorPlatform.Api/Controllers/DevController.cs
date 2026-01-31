@@ -25,12 +25,12 @@ public class DevController : ControllerBase
     }
 
     [HttpPost("seed")]
-    public async Task<ActionResult<DevSeedResponse>> Seed(CancellationToken ct)
+    public async Task<ActionResult<DevSeedResponse>> Seed(
+    [FromHeader(Name = "X-Dev-Seed")] string? devSeed,
+    CancellationToken ct)
     {
         if (!_env.IsDevelopment()) return NotFound();
-
-        if (!Request.Headers.TryGetValue("X-Dev-Seed", out var v) || v != "1")
-            return NotFound();
+        if (devSeed != "1") return NotFound();
 
         const string teacherEmail = "teacher.dev@local";
         const string studentEmail = "student.dev@local";
