@@ -1,4 +1,4 @@
-@host = http://127.0.0.1:5141
+@host = http://localhost:5141
 
 ### Seed
 # @name seed
@@ -12,7 +12,7 @@ X-Dev-Seed: 1
 @lessonId = {{seed.response.body.$.lessonId}}
 @studentId = {{seed.response.body.$.studentId}}
 
-### Teacher: Create session
+### Teacher: Create session (в будущее)
 # @name createSession
 POST {{host}}/api/sessions
 Authorization: Bearer {{teacherToken}}
@@ -21,7 +21,7 @@ Content-Type: application/json
 {
   "courseId": "{{courseId}}",
   "studentId": "{{studentId}}",
-  "startsAt": "2026-01-28T21:24:40.917Z",
+  "startsAt": "2026-01-30T12:00:00Z",
   "durationMinutes": 60,
   "lessonId": "{{lessonId}}",
   "videoLink": null,
@@ -42,4 +42,3 @@ Authorization: Bearer {{studentToken}}
 ### Student: My session details
 GET {{host}}/api/my/sessions/{{sessionId}}
 Authorization: Bearer {{studentToken}}
-

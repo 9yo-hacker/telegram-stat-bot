@@ -9,12 +9,16 @@ using TutorPlatform.Api.Application.Lessons;
 using TutorPlatform.Api.Application.Enrollments;
 using TutorPlatform.Api.Application.Sessions;
 using TutorPlatform.Api.Application.Homework;
+using FluentValidation;
+using FluentValidation.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddFluentValidationAutoValidation();
+builder.Services.AddValidatorsFromAssemblyContaining<TutorPlatform.Api.Contracts.Auth.LoginRequest>(); 
 builder.Services.AddScoped<ICourseService, CourseService>();
 builder.Services.AddScoped<ILessonService, LessonService>();
 builder.Services.AddScoped<IEnrollmentService, EnrollmentService>();
@@ -69,7 +73,10 @@ var app = builder.Build();
 app.UseSwagger();
 app.UseSwaggerUI();
 
-app.UseHttpsRedirection();
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 
 app.UseAuthentication();
 app.UseAuthorization();
