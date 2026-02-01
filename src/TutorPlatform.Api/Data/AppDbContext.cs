@@ -13,6 +13,8 @@ public sealed class AppDbContext : DbContext
     public DbSet<EnrollmentEntity> Enrollments => Set<EnrollmentEntity>();
     public DbSet<SessionEntity> Sessions => Set<SessionEntity>();
     public DbSet<HomeworkItemEntity> HomeworkItems => Set<HomeworkItemEntity>();
+    public DbSet<PasswordResetTokenEntity> PasswordResetTokens => Set<PasswordResetTokenEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);
