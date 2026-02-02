@@ -5,6 +5,7 @@ using Microsoft.IdentityModel.Tokens;
 using TutorPlatform.Api.Application.Abstractions;
 using TutorPlatform.Api.Data;
 using TutorPlatform.Api.Data.Entities;
+using Microsoft.Extensions.Logging; 
 
 namespace TutorPlatform.Api.Application.Auth;
 
@@ -14,13 +15,23 @@ public sealed class PasswordResetService : IPasswordResetService
     private readonly IPasswordHasher _hash;
     private readonly IClock _clock;
     private readonly IConfiguration _cfg;
+    private readonly IEmailSender _email;
+    private readonly ILogger<PasswordResetService> _log;
 
-    public PasswordResetService(AppDbContext db, IPasswordHasher hash, IClock clock, IConfiguration cfg)
+    public PasswordResetService(
+        AppDbContext db,
+        IPasswordHasher hash,
+        IClock clock,
+        IConfiguration cfg,
+        IEmailSender email,
+        ILogger<PasswordResetService> log)
     {
         _db = db;
         _hash = hash;
         _clock = clock;
         _cfg = cfg;
+        _email = email;
+        _log = log;
     }
 
     public async Task<string?> RequestAsync(string email, CancellationToken ct)
@@ -29,18 +40,16 @@ public sealed class PasswordResetService : IPasswordResetService
 
         var user = await _db.Users.SingleOrDefaultAsync(x => x.Email == norm, ct);
 
-        // не раскрываем, существует ли email.
+        // не раскрываем, существует ли email
         if (user is null) return null;
 
-        // 20 минут для MVP
         var now = _clock.UtcNow.UtcDateTime;
-        var expires = now.AddMinutes(GetTtlMinutes());
+        var ttl = GetTtlMinutes();
+        var expires = now.AddMinutes(ttl);
 
-        // генерируем url-safe token
         var token = GenerateToken();
         var tokenHash = Sha256Base64(token);
 
-        // редко, но на всякий — если вдруг уникальный индекс поймает коллизию, можно ретраить
         var ent = new PasswordResetTokenEntity
         {
             Id = Guid.NewGuid(),
@@ -54,7 +63,29 @@ public sealed class PasswordResetService : IPasswordResetService
         _db.PasswordResetTokens.Add(ent);
         await _db.SaveChangesAsync(ct);
 
-        // здесь позже будет отправка email (ссылки). Пока фронт может брать token в dev.
+        // отправка письма со ссылкой
+        // если SMTP не настроен — лучше падать на dev, а на prod успеется настроить.
+        var baseUrl = _cfg["Frontend:BaseUrl"] ?? "http://localhost:3000";
+        var link = $"{baseUrl.TrimEnd('/')}/reset-password?token={Uri.EscapeDataString(token)}";
+
+        var subject = "Восстановление пароля";
+        var html = $@"
+        <p>Кто-то запросил восстановление пароля для вашего аккаунта.</p>
+        <p>Если это вы — задайте новый пароль по ссылке (действует {ttl} минут):</p>
+        <p><a href=""{link}"">{link}</a></p>
+        <p>Если это были не вы — просто игнорируйте письмо.</p>
+        ";
+
+        try
+        {
+            await _email.SendAsync(user.Email, subject, html, ct);
+        }
+        catch (Exception ex)
+        {
+            // endpoint всё равно должен отвечать 200 (анти-enumeration),
+            _log.LogError(ex, "Password reset email send failed for {Email}", user.Email);
+        }
+        // токен возвращаем (контроллер всё равно отдаст его только в dev при X-Dev-Seed)
         return token;
     }
 
@@ -72,14 +103,11 @@ public sealed class PasswordResetService : IPasswordResetService
         if (pr.UsedAt is not null) return (false, "invalid_or_expired");
         if (pr.ExpiresAt <= now) return (false, "invalid_or_expired");
 
-        // ставим новый пароль
         pr.User.PasswordHash = _hash.Hash(newPassword);
         pr.User.UpdatedAt = now;
 
-        // токен одноразовый
         pr.UsedAt = now;
 
-        // инвалидируем все другие активные токены этого пользователя
         var others = await _db.PasswordResetTokens
             .Where(x => x.UserId == pr.UserId && x.UsedAt == null && x.Id != pr.Id)
             .ToListAsync(ct);
@@ -98,7 +126,7 @@ public sealed class PasswordResetService : IPasswordResetService
     private static string GenerateToken()
     {
         var bytes = RandomNumberGenerator.GetBytes(32);
-        return Base64UrlEncoder.Encode(bytes); // url-safe
+        return Base64UrlEncoder.Encode(bytes);
     }
 
     private static string Sha256Base64(string s)

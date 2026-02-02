@@ -11,6 +11,8 @@ using TutorPlatform.Api.Application.Sessions;
 using TutorPlatform.Api.Application.Homework;
 using FluentValidation;
 using FluentValidation.AspNetCore;
+using TutorPlatform.Api.Application.Auth;
+using TutorPlatform.Api.Application.Email;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,14 +26,22 @@ builder.Services.AddScoped<ILessonService, LessonService>();
 builder.Services.AddScoped<IEnrollmentService, EnrollmentService>();
 builder.Services.AddScoped<ISessionService, SessionService>();
 builder.Services.AddScoped<IHomeworkService, HomeworkService>();
+builder.Services.AddScoped<IPasswordResetService, PasswordResetService>();
+
+builder.Services.Configure<UnisenderGoOptions>(builder.Configuration.GetSection("UnisenderGo"));
+
+builder.Services.AddHttpClient<IEmailSender, UnisenderGoEmailSender>((sp, http) =>
+{
+    var opt = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<UnisenderGoOptions>>().Value;
+    http.BaseAddress = new Uri(opt.BaseUrl); // .../ru/transactional/api/v1/
+});
+
 
 builder.Services.AddDbContext<AppDbContext>(opt =>
 {
     opt.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"));
 });
-
 builder.Services.AddAppServices(builder.Configuration);
-
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -62,7 +72,6 @@ builder.Services.AddSwaggerGen(c =>
         }
     });
 });
-
 builder.Services
     .AddControllers()
     .AddJsonOptions(o =>
