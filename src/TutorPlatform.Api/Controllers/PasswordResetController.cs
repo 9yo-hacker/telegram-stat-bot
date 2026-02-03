@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using TutorPlatform.Api.Application.Abstractions;
 using TutorPlatform.Api.Common.Errors;
 using TutorPlatform.Api.Contracts.Auth;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace TutorPlatform.Api.Controllers;
 
@@ -21,8 +22,9 @@ public sealed class PasswordResetController : ControllerBase
     // 1) Request reset
     // всегда 200 OK.
     // Токен отдаём ТОЛЬКО в Development и только при X-Dev-Seed: 1 (фронт уже тестит)
+    [EnableRateLimiting("forgot_ip")]
     [HttpPost("request")]
-    public new async Task<ActionResult<PasswordResetRequestResponse>> Request(
+    public async Task<ActionResult<PasswordResetRequestResponse>> RequestReset(
         [FromBody] PasswordResetRequest req,
         [FromHeader(Name = "X-Dev-Seed")] string? devSeed,
         CancellationToken ct)

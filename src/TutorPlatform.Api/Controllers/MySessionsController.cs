@@ -15,10 +15,15 @@ public class MySessionsController : ControllerBase
     public MySessionsController(ISessionService sessions) => _sessions = sessions;
 
     [HttpGet]
-    public async Task<ActionResult<List<MySessionListItemResponse>>> GetMy(CancellationToken ct)
+    public async Task<ActionResult<List<MySessionListItemResponse>>> GetMy(
+        [FromQuery] Guid? courseId,
+        [FromQuery] DateTime? from,
+        [FromQuery] DateTime? to,
+        [FromQuery] int? status,
+        CancellationToken ct)
     {
         var studentId = User.GetUserId();
-        var list = await _sessions.GetMySessionsAsync(studentId, ct);
+        var list = await _sessions.GetMySessionsAsync(studentId, courseId, from, to, status, ct);
         return Ok(list);
     }
 

@@ -8,6 +8,12 @@ public interface ISessionService
     Task<(SessionResponse? session, string? error)> CreateAsync(Guid teacherId, CreateSessionRequest req, CancellationToken ct);
     Task<(bool ok, string? error)> UpdateAsync(Guid teacherId, Guid sessionId, UpdateSessionRequest req, CancellationToken ct);
     Task<(bool ok, string? error)> CompleteAsync(Guid teacherId, Guid sessionId, CancellationToken ct);
-    Task<List<MySessionListItemResponse>> GetMySessionsAsync(Guid studentId, CancellationToken ct);
+    Task<List<MySessionListItemResponse>> GetMySessionsAsync(
+        Guid studentId,
+        Guid? courseId,
+        DateTime? from,
+        DateTime? to,
+        int? status,
+        CancellationToken ct);
     Task<MySessionDetailsResponse?> GetMySessionAsync(Guid studentId, Guid sessionId, CancellationToken ct);
 }

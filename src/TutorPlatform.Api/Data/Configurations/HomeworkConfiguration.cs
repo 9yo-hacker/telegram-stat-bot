@@ -17,11 +17,18 @@ public class HomeworkItemConfiguration : IEntityTypeConfiguration<HomeworkItemEn
         b.Property(x => x.Description).HasMaxLength(4000);
         b.Property(x => x.LinkUrl).HasMaxLength(2000);
 
+        b.Property(x => x.StudentAnswer).HasMaxLength(4000);
+        b.Property(x => x.TeacherComment).HasMaxLength(4000);
+
         b.Property(x => x.CreatedAt).IsRequired();
         b.Property(x => x.UpdatedAt).IsRequired();
 
         b.HasIndex(x => new { x.EnrollmentId, x.Status });
         b.HasIndex(x => x.DueAt);
+
+        // quick filters for student UI
+        b.HasIndex(x => x.CheckedAt);
+        b.HasIndex(x => x.StudentAnswerSubmittedAt);
 
         b.HasOne(x => x.Enrollment)
             .WithMany(e => e.HomeworkItems)

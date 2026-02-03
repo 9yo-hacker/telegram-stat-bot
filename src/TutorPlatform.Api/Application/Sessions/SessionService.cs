@@ -158,12 +158,32 @@ public class SessionService : ISessionService
         return (true, null);
     }
 
-    public async Task<List<MySessionListItemResponse>> GetMySessionsAsync(Guid studentId, CancellationToken ct)
+    public async Task<List<MySessionListItemResponse>> GetMySessionsAsync(
+        Guid studentId,
+        Guid? courseId,
+        DateTime? from,
+        DateTime? to,
+        int? status,
+        CancellationToken ct)
     {
-        return await _db.Sessions.AsNoTracking()
-            .Where(s => s.StudentId == studentId)
-            .OrderByDescending(s => s.StartsAt)
-            .Select(s => new MySessionListItemResponse(s.Id, s.StartsAt, s.DurationMinutes, s.Status))
+        var q = _db.Sessions.AsNoTracking().Where(s => s.StudentId == studentId);
+
+        if (courseId is not null) q = q.Where(s => s.CourseId == courseId);
+        if (from is not null) q = q.Where(s => s.StartsAt >= from);
+        if (to is not null) q = q.Where(s => s.StartsAt < to);
+        if (status is not null) q = q.Where(s => (int)s.Status == status);
+
+        return await q
+            .OrderBy(s => s.StartsAt)
+            .Select(s => new MySessionListItemResponse(
+                s.Id,
+                s.CourseId,
+                s.LessonId,
+                s.StartsAt,
+                s.DurationMinutes,
+                s.Status,
+                s.VideoLink ?? s.Course.DefaultVideoLink
+            ))
             .ToListAsync(ct);
     }
 

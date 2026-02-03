@@ -1,44 +1,281 @@
-@host = http://localhost:5141
+# TutorPlatform manual test suite (VS Code REST Client) EXTANSION NEEDED!!!
+# How to use:
+# 1) Run the SEED request.
+# 3) Replace IDs ({{courseId}}, {{lessonId}}, {{sessionId}}, {{homeworkId}}) from responses.
+#
+# Tip: In VS Code REST Client you can click "Send Request" on each block.
 
-### Seed
-# @name seed
-POST {{host}}/api/dev/seed
-X-Dev-Seed: 1
+@baseUrl = http://localhost:5141
+@teacherToken = JWT_TOKEN_AFTER_LOGIN_OR_REGISTER
+@studentToken = JWT_TOKEN_AFTER_LOGIN_OR_REGISTER
+@studentCode = 123456789
+@sessionId = REPLACE_ME_SESSION_GUID
+@courseId = REPLACE_ME_COURSE_GUID
+@lessonId = REPLACE_ME_LESSON_GUID
+@homeworkId = REPLACE_ME_HOMEWORK_GUID
+# Use ISO
+@startsAt = 2026-02-05T18:00:00Z
+@endsAt   = 2026-02-05T19:00:00Z
+@from = 2026-02-03T00:00:00Z
+@to   = 2026-02-10T00:00:00Z
 
-### Vars from seed
-@teacherToken = {{seed.response.body.$.teacherToken}}
-@studentToken = {{seed.response.body.$.studentToken}}
-@courseId = {{seed.response.body.$.courseId}}
-@lessonId = {{seed.response.body.$.lessonId}}
-@studentId = {{seed.response.body.$.studentId}}
 
-### Teacher: Create session (в будущее)
+# =========================
+# 0) DEV: Seed test data
+# =========================
+### DEV SEED (idempotent)
+POST {{baseUrl}}/api/dev/seed
+x-dev-seed: 1
+
+
+# =========================
+# 1) AUTH 
+# =========================
+
+### AUTH LOGIN (TEACHER) - TEMPLATE
+# @name loginTeacher
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "teacher@test.com",
+  "password": "Password123!"
+}
+
+### AUTH LOGIN (STUDENT) - TEMPLATE
+# @name loginStudent
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "student@test.com",
+  "password": "Password123!"
+}
+
+### AUTH /ME
+# @name myProfile
+GET {{baseUrl}}/api/auth/me
+Authorization: Bearer {{teacherToken}}
+Content-Type: application/json
+
+# =========================
+# 2) TEACHER: Courses
+# =========================
+
+### TEACHER - Get my courses
+GET {{baseUrl}}/api/courses
+Authorization: Bearer {{teacherToken}}
+
+### TEACHER - Create course after response, set @courseId:
+
+# @name createCourse
+POST {{baseUrl}}/api/courses
+Authorization: Bearer {{teacherToken}}
+Content-Type: application/json
+
+{
+  "title": "API Test Course",
+  "description": "Course created from REST Client tests",
+  "status": 0
+}
+
+### TEACHER - Get course by id
+GET {{baseUrl}}/api/courses/{{courseId}}
+Authorization: Bearer {{teacherToken}}
+
+### TEACHER - Update course
+PUT {{baseUrl}}/api/courses/{{courseId}}
+Authorization: Bearer {{teacherToken}}
+Content-Type: application/json
+
+{
+  "title": "API Test Course (updated)",
+  "description": "Updated description"
+}
+
+### TEACHER - Archive/Close course
+PATCH {{baseUrl}}/api/courses/{{courseId}}/archive
+Authorization: Bearer {{teacherToken}}
+
+
+# =========================
+# 3) TEACHER: Lessons
+# =========================
+
+### TEACHER - Create lesson
+# @name createLesson
+POST {{baseUrl}}/api/courses/{{courseId}}/lessons
+Authorization: Bearer {{teacherToken}}
+Content-Type: application/json
+
+{
+  "title": "Lesson 1",
+  "description": "Lesson created from tests",
+  "materialUrl": "https://example.com/material"
+}
+
+### TEACHER - List lessons in course 
+GET {{baseUrl}}/api/courses/{{courseId}}/lessons
+Authorization: Bearer {{teacherToken}}
+
+### TEACHER - Get lesson by id 
+GET {{baseUrl}}/api/courses/{{courseId}}/lessons/{{lessonId}}
+Authorization: Bearer {{teacherToken}}
+
+
+# =========================
+# 4) TEACHER: Enrollments (studentCode is 9 digits)
+# =========================
+
+### TEACHER - Enroll student by studentCode 
+POST {{baseUrl}}/api/courses/{{courseId}}/enrollments
+Authorization: Bearer {{teacherToken}}
+Content-Type: application/json
+
+{
+  "studentCode": "{{studentCode}}"
+}
+
+### TEACHER - List enrollments in course 
+GET {{baseUrl}}/api/courses/{{courseId}}/enrollments
+Authorization: Bearer {{teacherToken}}
+
+
+# =========================
+# 5) TEACHER: Sessions
+# =========================
+
+### TEACHER - Create session 
 # @name createSession
-POST {{host}}/api/sessions
+POST {{baseUrl}}/api/sessions
 Authorization: Bearer {{teacherToken}}
 Content-Type: application/json
 
 {
   "courseId": "{{courseId}}",
-  "studentId": "{{studentId}}",
-  "startsAt": "2026-01-30T12:00:00Z",
-  "durationMinutes": 60,
   "lessonId": "{{lessonId}}",
-  "videoLink": null,
-  "notes": "dev test"
+  "studentCode": "{{studentCode}}",
+  "startsAt": "{{startsAt}}",
+  "endsAt": "{{endsAt}}",
+  "videoLink": null
 }
 
-### Vars from createSession
-@sessionId = {{createSession.response.body.$.id}}
-
-### Teacher: Complete session
-POST {{host}}/api/sessions/{{sessionId}}/complete
+### TEACHER - List sessions (adjust filters if needed)
+GET {{baseUrl}}/api/sessions?courseId={{courseId}}
 Authorization: Bearer {{teacherToken}}
 
-### Student: My sessions list
-GET {{host}}/api/my/sessions
+### TEACHER - Cancel session
+POST {{baseUrl}}/api/sessions/{{sessionId}}/cancel
+Authorization: Bearer {{teacherToken}}
+
+### TEACHER - Complete session
+POST {{baseUrl}}/api/sessions/{{sessionId}}/complete
+Authorization: Bearer {{teacherToken}}
+
+### TEACHER - Get session details
+GET {{baseUrl}}/api/sessions/{{sessionId}}
+Authorization: Bearer {{teacherToken}}
+
+
+# =========================
+# 6) STUDENT: Schedule (KEY screen)
+# =========================
+
+### STUDENT - Get my sessions (all)
+GET {{baseUrl}}/api/my/sessions
 Authorization: Bearer {{studentToken}}
 
-### Student: My session details
-GET {{host}}/api/my/sessions/{{sessionId}}
+### STUDENT - Get my sessions (planned)
+GET {{baseUrl}}/api/my/sessions?status=planned
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - Get my sessions (done)
+GET {{baseUrl}}/api/my/sessions?status=done
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - Get my sessions (range)
+GET {{baseUrl}}/api/my/sessions?from={{from}}&to={{to}}
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - Get my session by id
+GET {{baseUrl}}/api/my/sessions/{{sessionId}}
+Authorization: Bearer {{studentToken}}
+
+
+# =========================
+# 7) STUDENT: My courses
+# =========================
+
+### STUDENT - List my courses
+GET {{baseUrl}}/api/my/courses
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - Get my course by id
+GET {{baseUrl}}/api/my/courses/{{courseId}}
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - Lessons in course (filter planned)
+GET {{baseUrl}}/api/my/courses/{{courseId}}/lessons?filter=planned
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - Lessons in course (filter done)
+GET {{baseUrl}}/api/my/courses/{{courseId}}/lessons?filter=done
+Authorization: Bearer {{studentToken}}
+
+
+# =========================
+# 8) STUDENT: Homework (Phase 2 / MVP-ready)
+# =========================
+
+### STUDENT - List active homework
+GET {{baseUrl}}/api/my/homework?filter=active
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - List checked homework
+GET {{baseUrl}}/api/my/homework?filter=checked
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - Homework details
+GET {{baseUrl}}/api/my/homework/{{homeworkId}}
+Authorization: Bearer {{studentToken}}
+
+### STUDENT - Submit answer (text or link)
+POST {{baseUrl}}/api/my/homework/{{homeworkId}}/answer
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "answer": "https://example.com/my-homework-answer"
+}
+
+# (Optional) TEACHER - Check homework (comment + grade)
+POST {{baseUrl}}/api/homework/{{homeworkId}}/check
+Authorization: Bearer {{teacherToken}}
+Content-Type: application/json
+
+{
+  "comment": "Looks good",
+  "grade": 95
+}
+
+
+# =========================
+# 9) NEGATIVE TESTS (security)
+# =========================
+
+### NEGATIVE - Student calls teacher endpoint (must be 403)
+GET {{baseUrl}}/api/courses
+Authorization: Bearer {{studentToken}}
+
+### NEGATIVE - Teacher calls student endpoint (must be 403)
+GET {{baseUrl}}/api/my/sessions
+Authorization: Bearer {{teacherToken}}
+
+### NEGATIVE - Student tries чужой курс (set random GUID) -> 404/403
+@foreignCourseId = 00000000-0000-0000-0000-000000000001
+GET {{baseUrl}}/api/my/courses/{{foreignCourseId}}
+Authorization: Bearer {{studentToken}}
+
+### NEGATIVE - Bad filter value (should be 400 or handled)
+GET {{baseUrl}}/api/my/courses/{{courseId}}/lessons?filter=lol
 Authorization: Bearer {{studentToken}}

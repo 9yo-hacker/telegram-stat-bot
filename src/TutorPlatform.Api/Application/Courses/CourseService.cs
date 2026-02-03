@@ -103,6 +103,42 @@ public class CourseService : ICourseService
         return true;
     }
 
+    // Student side
+
+    public async Task<List<CourseListItemResponse>> GetMyCoursesAsStudentAsync(Guid studentId, CancellationToken ct)
+    {
+        // only courses where student has an Active enrollment
+        return await _db.Enrollments.AsNoTracking()
+            .Where(e => e.StudentId == studentId && e.Status == EnrollmentStatus.Active)
+            .OrderByDescending(e => e.UpdatedAt)
+            .Select(e => new CourseListItemResponse(
+                e.Course.Id,
+                e.Course.Title,
+                e.Course.Status,
+                e.Course.CreatedAt,
+                e.Course.UpdatedAt
+            ))
+            .Distinct()
+            .ToListAsync(ct);
+    }
+
+    public async Task<CourseResponse?> GetMyCourseAsStudentAsync(Guid studentId, Guid courseId, CancellationToken ct)
+    {
+        // access via enrollment; do not leak course existence
+        return await _db.Enrollments.AsNoTracking()
+            .Where(e => e.StudentId == studentId && e.Status == EnrollmentStatus.Active && e.CourseId == courseId)
+            .Select(e => new CourseResponse(
+                e.Course.Id,
+                e.Course.Title,
+                e.Course.Description,
+                e.Course.DefaultVideoLink,
+                e.Course.Status,
+                e.Course.CreatedAt,
+                e.Course.UpdatedAt
+            ))
+            .FirstOrDefaultAsync(ct);
+    }
+
     private static void Validate(string title, string description, string? defaultVideoLink)
     {
         if (string.IsNullOrWhiteSpace(title) || title.Trim().Length > 200)

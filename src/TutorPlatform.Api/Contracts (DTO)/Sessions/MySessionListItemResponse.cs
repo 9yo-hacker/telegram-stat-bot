@@ -4,7 +4,10 @@ namespace TutorPlatform.Api.Contracts.Sessions;
 
 public record MySessionListItemResponse(
     Guid Id,
+    Guid CourseId,
+    Guid? LessonId,
     DateTime StartsAt,
     int DurationMinutes,
-    SessionStatus Status
+    SessionStatus Status,
+    string? VideoLinkEffective
 );

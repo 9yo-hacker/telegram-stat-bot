@@ -33,4 +33,15 @@ public class HomeworkController : ControllerBase
         if (!ok) return error == "not_found" ? NotFound() : BadRequest();
         return NoContent();
     }
+
+    // Teacher: mark homework as checked (comment + grade)
+    [HttpPost("{homeworkId:guid}/check")]
+    public async Task<IActionResult> Check(Guid homeworkId, CheckHomeworkRequest req, CancellationToken ct)
+    {
+        var teacherId = User.GetUserId();
+        var (ok, error) = await _hw.CheckAsync(teacherId, homeworkId, req, ct);
+
+        if (!ok) return error == "not_found" ? NotFound() : BadRequest(new { error });
+        return NoContent();
+    }
 }

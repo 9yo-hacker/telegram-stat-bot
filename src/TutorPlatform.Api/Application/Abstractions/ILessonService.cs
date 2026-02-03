@@ -6,4 +6,11 @@ public interface ILessonService
     Task<LessonResponse?> GetAsync(Guid teacherId, Guid lessonId, CancellationToken ct);
     Task<Guid> CreateAsync(Guid teacherId, Guid courseId, CreateLessonRequest req, CancellationToken ct);
     Task<bool> UpdateAsync(Guid teacherId, Guid lessonId, UpdateLessonRequest req, CancellationToken ct);
+
+    // Student side (lessons list with filter planned/done by sessions)
+    Task<IReadOnlyList<MyLessonListItemResponse>?> GetMyLessonsByCourseAsync(
+        Guid studentId,
+        Guid courseId,
+        string? filter,
+        CancellationToken ct);
 }

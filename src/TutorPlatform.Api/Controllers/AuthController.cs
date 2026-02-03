@@ -6,6 +6,7 @@ using TutorPlatform.Api.Common.Auth;
 using TutorPlatform.Api.Common.Errors;
 using TutorPlatform.Api.Contracts.Auth;
 using TutorPlatform.Api.Data;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace TutorPlatform.Api.Controllers;
 
@@ -22,6 +23,7 @@ public sealed class AuthController : ControllerBase
         _db = db;
     }
 
+    [EnableRateLimiting("auth_register_ip")]
     [HttpPost("register")]
     [ProducesResponseType(typeof(AuthResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ApiError), StatusCodes.Status409Conflict)]
@@ -41,6 +43,7 @@ public sealed class AuthController : ControllerBase
         }
     }
 
+    [EnableRateLimiting("auth_login_ip")]
     [HttpPost("login")]
     [ProducesResponseType(typeof(AuthResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ApiError), StatusCodes.Status401Unauthorized)]

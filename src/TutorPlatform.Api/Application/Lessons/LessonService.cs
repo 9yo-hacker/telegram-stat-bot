@@ -120,9 +120,7 @@ public sealed class LessonService : ILessonService
         return true;
     }
 
-    // -------------------------
     // Validation helpers
-    // -------------------------
 
     private static void ValidateCreate(CreateLessonRequest req)
     {
@@ -168,4 +166,77 @@ public sealed class LessonService : ILessonService
 
     private static string? NormalizeUrl(string? url)
         => string.IsNullOrWhiteSpace(url) ? null : url.Trim();
+
+    // Student side
+
+    public async Task<IReadOnlyList<MyLessonListItemResponse>?> GetMyLessonsByCourseAsync(
+        Guid studentId,
+        Guid courseId,
+        string? filter,
+        CancellationToken ct)
+    {
+        // access: must have Active enrollment
+        var enrolled = await _db.Enrollments.AsNoTracking()
+            .AnyAsync(e => e.CourseId == courseId && e.StudentId == studentId && e.Status == EnrollmentStatus.Active, ct);
+        if (!enrolled) return null;
+
+        var now = DateTime.UtcNow;
+
+        // For this student & course: aggregate sessions per lesson
+        var perLesson = await _db.Sessions.AsNoTracking()
+            .Where(s => s.CourseId == courseId && s.StudentId == studentId && s.LessonId != null)
+            .GroupBy(s => s.LessonId!.Value)
+            .Select(g => new
+            {
+                LessonId = g.Key,
+                HasPlanned = g.Any(s => s.Status == SessionStatus.Planned && s.StartsAt >= now),
+                HasDone = g.Any(s => s.Status == SessionStatus.Done),
+                NextPlannedAt = g.Where(s => s.Status == SessionStatus.Planned && s.StartsAt >= now)
+                    .Min(s => (DateTime?)s.StartsAt),
+                LastDoneAt = g.Where(s => s.Status == SessionStatus.Done)
+                    .Max(s => (DateTime?)s.StartsAt)
+            })
+            .ToListAsync(ct);
+
+        // join lessons + aggregated flags
+        var lessons = await _db.Lessons.AsNoTracking()
+            .Where(l => l.CourseId == courseId)
+            .OrderByDescending(l => l.UpdatedAt)
+            .Select(l => new
+            {
+                l.Id,
+                l.CourseId,
+                l.Title,
+                l.MaterialUrl,
+                l.Status
+            })
+            .ToListAsync(ct);
+
+        var map = perLesson.ToDictionary(x => x.LessonId);
+
+        var result = lessons.Select(l =>
+        {
+            map.TryGetValue(l.Id, out var agg);
+            return new MyLessonListItemResponse(
+                l.Id,
+                l.CourseId,
+                l.Title,
+                l.MaterialUrl,
+                l.Status,
+                agg?.HasPlanned ?? false,
+                agg?.HasDone ?? false,
+                agg?.NextPlannedAt,
+                agg?.LastDoneAt
+            );
+        });
+
+        // UI filter: planned / done (based on sessions)
+        if (string.Equals(filter, "planned", StringComparison.OrdinalIgnoreCase))
+            return result.Where(x => x.HasPlannedSessions).ToList();
+
+        if (string.Equals(filter, "done", StringComparison.OrdinalIgnoreCase))
+            return result.Where(x => x.HasDoneSessions).ToList();
+
+        return result.ToList();
+    }
 }

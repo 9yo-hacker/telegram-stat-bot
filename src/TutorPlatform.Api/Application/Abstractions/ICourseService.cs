@@ -9,4 +9,8 @@ public interface ICourseService
     Task<CourseResponse> CreateAsync(Guid teacherId, CreateCourseRequest req, CancellationToken ct);
     Task<bool> UpdateAsync(Guid teacherId, Guid courseId, UpdateCourseRequest req, CancellationToken ct);
     Task<bool> ArchiveAsync(Guid teacherId, Guid courseId, CancellationToken ct);
+
+    // Student side
+    Task<List<CourseListItemResponse>> GetMyCoursesAsStudentAsync(Guid studentId, CancellationToken ct);
+    Task<CourseResponse?> GetMyCourseAsStudentAsync(Guid studentId, Guid courseId, CancellationToken ct);
 }

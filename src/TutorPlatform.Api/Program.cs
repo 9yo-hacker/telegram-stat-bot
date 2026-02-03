@@ -13,6 +13,8 @@ using FluentValidation;
 using FluentValidation.AspNetCore;
 using TutorPlatform.Api.Application.Auth;
 using TutorPlatform.Api.Application.Email;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -72,6 +74,48 @@ builder.Services.AddSwaggerGen(c =>
         }
     });
 });
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("auth_register_ip", httpContext =>
+    {
+        var ip = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ip,
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,                  // 5 регистраций
+                Window = TimeSpan.FromMinutes(10),// за 10 минут
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            });
+    });
+
+    options.AddPolicy("auth_login_ip", httpContext =>
+    {
+        var ip = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: ip,
+            factory: _ => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 20,                  // 20 попыток логина
+                Window = TimeSpan.FromMinutes(1),  // за минуту
+                SegmentsPerWindow = 4,
+                QueueLimit = 0
+            });
+    });
+
+    options.AddPolicy("forgot_ip", ctx =>
+    {
+        var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(ip, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 5,
+            Window = TimeSpan.FromMinutes(10),
+            QueueLimit = 0
+        });
+    });
+});
 builder.Services
     .AddControllers()
     .AddJsonOptions(o =>
@@ -89,6 +133,8 @@ if (!app.Environment.IsDevelopment())
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.UseRateLimiter();
 
 app.MapControllers();
 

@@ -17,6 +17,15 @@ public class HomeworkItemEntity
     // Todo -> null, Done/Skipped -> now
     public DateTime? CompletedAt { get; set; }
 
+    // Student answer (Phase 2 but DTOs already planned)
+    public string? StudentAnswer { get; set; }
+    public DateTime? StudentAnswerSubmittedAt { get; set; }
+
+    // Teacher review ("checked")
+    public string? TeacherComment { get; set; }
+    public int? TeacherGrade { get; set; } // 0..100 (decide in UI)
+    public DateTime? CheckedAt { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
