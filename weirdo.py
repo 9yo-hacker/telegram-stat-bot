@@ -616,8 +616,9 @@ def rep_mark_vote(chat_id: int, from_id: int, to_id: int, now: datetime):
 # =======================
 # TOKENS WALLET
 # =======================
-MAX_BET = 200
-SLOT_COOLDOWN_MIN = 10
+
+MAX_BET = 1000
+SLOT_COOLDOWN_MIN = 1
 PAY_FEE_PCT = 3  # комиссия на переводы, %
 
 def wallet_get(chat_id: int, user_id: int) -> int:
